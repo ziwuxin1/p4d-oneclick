@@ -1,0 +1,19 @@
+name: shellcheck
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n
+        run: bash -n install-ubuntu.sh && bash -n p4d-toolkit.sh
+      - name: no CRLF
+        run: "! grep -l $'\\r' install-ubuntu.sh p4d-toolkit.sh"
+      - name: shellcheck installer (warning)
+        run: shellcheck -x -S warning install-ubuntu.sh
+      - name: shellcheck toolkit (error; 继承自 ssh-toolkit-linux 的老代码有少量 warning)
+        run: shellcheck -x -S error p4d-toolkit.sh

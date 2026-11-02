@@ -1,0 +1,6 @@
+# 永远不要提交 license / 凭据
+license
+*.license
+*credentials*.txt
+.p4_admin_passwd
+*.log
