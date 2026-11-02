@@ -10,7 +10,7 @@
 |---|---|
 | 系统 | Ubuntu **22.04 / 24.04 LTS** |
 | 架构 | **x86_64**（P4D 安装包是 x86 版本，ARM 机型跑不了） |
-| 配置 | 内存 ≥ 2 GB，`/opt` 可用空间 ≥ 10 GB（depot 越大，盘要越大） |
+| 配置 | 内存 ≥ 1 GB（低于 2 GB 且没有 swap 时自动建 2 GB swap），`/opt` 可用空间 ≥ 10 GB（depot 越大，盘要越大） |
 | License | **必须提供**。Perforce license 绑定服务器 IP，要用这台 VPS 的 IP 来申请或 rehost |
 | 云安全组 | 放行 SSH 和 `1888/tcp`。ufw 只管机器自己的防火墙，管不到云厂商那一层 |
 
