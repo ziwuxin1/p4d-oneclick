@@ -45,7 +45,10 @@ readonly MONITOR_CONFIG="${MONITOR_DIR}/config/config.yaml"
 readonly MONITOR_SSH_KEY="/etc/p4d-monitor/ssh_key"
 
 readonly SUPPORTED_UBUNTU="22.04 24.04"
-readonly MIN_RAM_MB=1800
+readonly MIN_RAM_MB="${MIN_RAM_MB:-900}"          # 1GB VPS 的 MemTotal 约 960MB
+readonly RECOMMENDED_RAM_MB=1800                   # 低于这个且没有 swap → 自动建 swap
+readonly SWAP_FILE="/swapfile"
+readonly SWAP_SIZE_GB=2
 readonly MIN_DISK_GB=10
 readonly P4D_START_TIMEOUT_S=60
 readonly MONITOR_START_TIMEOUT_S=60
@@ -248,10 +251,35 @@ preflight() {
     (( disk_gb >= MIN_DISK_GB )) || die "/opt 可用空间 ${disk_gb}GB < 最低 ${MIN_DISK_GB}GB"
     ok "/opt 可用: ${disk_gb}GB"
 
+    if (( ram_mb < RECOMMENDED_RAM_MB )); then
+        ensure_swap
+    fi
+
     check_port_free "$P4PORT" p4d "P4D"
     if [[ "$INSTALL_MONITOR" == "1" ]]; then
         check_port_free "$MONITOR_PORT" python "监控面板"
     fi
+}
+
+ensure_swap() {
+    # 小内存 VPS: pip 编译 / P4D 大操作时防止 OOM。已有 swap 就不动。
+    local swap_kb; swap_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)"
+    if (( swap_kb > 0 )); then
+        ok "已有 swap: $(( swap_kb / 1024 ))MB"
+        return 0
+    fi
+    if [[ -e "$SWAP_FILE" ]]; then
+        warn "$SWAP_FILE 已存在但没启用,不覆盖 — 请手动检查"
+        return 0
+    fi
+    info "内存低于 ${RECOMMENDED_RAM_MB}MB 且没有 swap,创建 ${SWAP_SIZE_GB}GB $SWAP_FILE"
+    fallocate -l "${SWAP_SIZE_GB}G" "$SWAP_FILE" 2>/dev/null \
+        || dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$(( SWAP_SIZE_GB * 1024 )) status=none
+    chmod 600 "$SWAP_FILE"
+    mkswap "$SWAP_FILE" >/dev/null
+    swapon "$SWAP_FILE"
+    grep -qE "^${SWAP_FILE}\s" /etc/fstab || echo "${SWAP_FILE} none swap sw 0 0" >> /etc/fstab
+    ok "swap 已启用并写入 /etc/fstab (重启后仍生效)"
 }
 
 check_port_free() {
