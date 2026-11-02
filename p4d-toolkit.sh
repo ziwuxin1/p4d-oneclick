@@ -52,6 +52,10 @@ readonly ROOT_TEMP_DEFAULT="${WORK_DIR_DEFAULT}/Root_Temp"
 # 安装包来源(GitHub raw),你把 tgz 上传到 dist/ 目录后这个 URL 才有效
 readonly P4D_TGZ_URL_TEMPLATE="https://raw.githubusercontent.com/ziwuxin1/ssh-toolkit-linux/main/dist/server-%s.tgz"
 
+# ---- License 一键生成 (keygen.exe via wine) ----
+readonly KEYGEN_EXE_DEFAULT="D:\\Perforce P4D灾难救援V2\\Keygen.exe"
+readonly LICENSE_GEN_DIR_DEFAULT="${WORK_DIR_DEFAULT}/License_Gen"
+
 # Config file (loaded if present, written by deploy steps)
 readonly CONFIG_FILE="/etc/ssh-toolkit.conf"
 
@@ -168,6 +172,8 @@ load_config() {
     P4D_ADMIN_PASSWD_FILE="/opt/perforce/.p4_admin_passwd"
     # shellcheck disable=SC2059
     P4D_TGZ_URL="${P4D_TGZ_URL:-$(printf "$P4D_TGZ_URL_TEMPLATE" "$P4D_VERSION")}"
+    KEYGEN_EXE="${KEYGEN_EXE:-$KEYGEN_EXE_DEFAULT}"
+    LICENSE_GEN_DIR="${LICENSE_GEN_DIR:-$LICENSE_GEN_DIR_DEFAULT}"
 
     if [[ -f "$CONFIG_FILE" ]]; then
         # shellcheck disable=SC1090
@@ -405,7 +411,15 @@ step_install_license() {
     info "找到 license 文件: $src ($(stat -c%s "$src") bytes)"
 
     info "复制到 $P4ROOT/license"
-    install -m 644 -o "$P4D_USER" -g "$P4D_USER" "$src" "$P4ROOT/license"
+    # 确保目录存在 (即使 P4D_USER 未创建也能导入)
+    install -d -m 755 "$P4ROOT"
+
+    if id "$P4D_USER" >/dev/null 2>&1; then
+        install -m 644 -o "$P4D_USER" -g "$P4D_USER" "$src" "$P4ROOT/license"
+    else
+        info "用户 $P4D_USER 尚不存在, 以 root 身份写入, 后续可 chown 修正"
+        install -m 644 "$src" "$P4ROOT/license"
+    fi
 
     if ! license_present; then
         err "$P4ROOT/license 不存在(复制失败)"
@@ -1048,6 +1062,119 @@ step_run_rsync_now() {
     fi
 }
 
+find_wine() {
+    local w
+    for w in wine64 wine; do
+        if command -v "$w" >/dev/null 2>&1; then
+            printf "%s" "$w"
+            return 0
+        fi
+    done
+    return 1
+}
+
+step_gen_license() {
+    section "License 一键生成 (Keygen.exe via wine) + 自动导入"
+
+    # -- 1. wine --
+    local wine
+    if ! wine="$(find_wine)"; then
+        err "未装 wine,跑不了 Keygen.exe"
+        info "安装命令 (Ubuntu / WSL2 都适用): sudo apt update && sudo apt install -y wine wine64"
+        info "装完重跑本菜单项即可 (Keygen.exe 是 64 位,不需要 wine32)"
+        return 1
+    fi
+    ok "wine: $(command -v "$wine") — $($wine --version 2>/dev/null | head -1)"
+
+    # -- 2. 定位 Keygen.exe (默认仓库路径,找不到再问) --
+    local keygen="${KEYGEN_EXE}"
+    if [[ ! -f "$keygen" ]]; then
+        warn "未在默认位置找到 Keygen.exe: $keygen"
+        read -r -p "$(printf "${C_CYAN}输入 Keygen.exe 完整路径: ${C_RESET}")" keygen
+    fi
+    if [[ ! -f "$keygen" ]]; then
+        err "Keygen.exe 不存在: $keygen"
+        return 1
+    fi
+    ok "Keygen: $keygen"
+
+    # -- 3. 参数 (直接回车用默认值) --
+    local default_ip ip customer lic_exp sup_exp users
+    default_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    read -r -p "$(printf "${C_CYAN}License IP (必须=P4D 服务器 IP,默认 ${default_ip:-空}): ${C_RESET}")" ip
+    ip="${ip:-${default_ip}}"
+    if [[ -z "$ip" ]]; then
+        err "IP 不能为空"
+        return 1
+    fi
+    read -r -p "$(printf "${C_CYAN}customer (默认 admin): ${C_RESET}")" customer;   customer="${customer:-admin}"
+    read -r -p "$(printf "${C_CYAN}license 过期年 (默认 2050): ${C_RESET}")" lic_exp;  lic_exp="${lic_exp:-2050}"
+    read -r -p "$(printf "${C_CYAN}support 过期年 (默认 2050): ${C_RESET}")" sup_exp; sup_exp="${sup_exp:-2050}"
+    read -r -p "$(printf "${C_CYAN}用户数 (默认 1000): ${C_RESET}")" users;        users="${users:-1000}"
+
+    # -- 4. 跑 Keygen.exe (在干净目录里,便于认出输出文件) --
+    local out_dir="$LICENSE_GEN_DIR"
+    mkdir -p "$out_dir"
+    local bold="${C_BOLD}" reset="${C_RESET}"
+    local cmd="${bold}${wine} \"${keygen}\" -customer ${customer} -ip ${ip} -license-expires ${lic_exp} -support-expires ${sup_exp} -users ${users}${reset}"
+    info "执行: $cmd"
+    local rc=0
+    ( cd "$out_dir" && "$wine" "$keygen" \
+        -customer "$customer" -ip "$ip" \
+        -license-expires "$lic_exp" -support-expires "$sup_exp" \
+        -users "$users" ) || rc=$?
+    if (( rc != 0 )); then
+        warn "Keygen 退出码 $rc — 继续检查输出目录是否生成了 license"
+    fi
+
+    # -- 5. 找出刚生成的 license 文件 --
+    local -a candidates=()
+    local f n
+    while IFS= read -r f; do
+        case "$(basename "$f")" in
+            .wine-*|*.log|keygen-debug.*) continue ;;
+        esac
+        candidates+=("$f")
+    done < <(find "$out_dir" -maxdepth 1 -type f 2>/dev/null)
+
+    local lic_file=""
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        warn "未在 $out_dir 发现新文件 — 请手动指定 license 路径"
+        read -r -p "License 文件路径: " lic_file
+    elif [[ ${#candidates[@]} -eq 1 ]]; then
+        lic_file="${candidates[0]}"
+    else
+        info "检测到多个文件,选择 license 是哪一个:"
+        n=1
+        for f in "${candidates[@]}"; do
+            printf "   %d) %s\n" "$n" "${f#"$out_dir"/}"
+            ((n++))
+        done
+        read -r -p "输入序号: " n
+        lic_file="${candidates[n-1]}"
+    fi
+    if [[ -z "$lic_file" || ! -f "$lic_file" ]]; then
+        err "license 文件不存在: ${lic_file:-<未指定>}"
+        return 1
+    fi
+    ok "License 文件: $lic_file"
+
+    # -- 6. 内容抽检 --
+    info "=== 内容预览 (前 10 行) ==="
+    head -10 "$lic_file" | sed 's/^/   /'
+    if ! grep -qE "License:|IPaddress:|Users:|ExpireDate:" "$lic_file"; then
+        warn "没看到标准 Perforce license 字段 (License:/IPaddress:/Users:/ExpireDate:)"
+        read -r -p "确认这就是 license 文件? (y/N): " yn
+        [[ "$yn" =~ ^[yY] ]] || { info "已取消导入 (文件保留在 $out_dir)"; return 1; }
+    fi
+
+    # -- 7. 自动导入 (复用 step_install_license: 拷贝到 $P4ROOT/license + IP/用户数校验) --
+    install -d -m 755 "$INSTALL_TEMP"
+    cp -f "$lic_file" "${INSTALL_TEMP}/license"
+    ok "已放入 ${INSTALL_TEMP}/license,开始自动导入…"
+    step_install_license
+}
+
 step_uninstall() {
     section "⚠ 卸载 P4D + Toolkit"
     warn "这会停止服务、删除 systemd unit、cron、二进制文件"
@@ -1104,6 +1231,7 @@ main_menu() {
   15) 启动服务
   16) 停止服务
   17) 重启服务
+  18) 一键生成 license (keygen.exe via wine) + 自动导入
 
   ${C_BOLD}── 危险区 ──${C_RESET}
   99) 卸载 P4D + Toolkit
@@ -1131,6 +1259,7 @@ MENU
             15) systemctl start "$SVC_NAME" && ok "已启动" ;;
             16) systemctl stop  "$SVC_NAME" && ok "已停止" ;;
             17) systemctl restart "$SVC_NAME" && ok "已重启" ;;
+            18) step_gen_license ;;
             99) step_uninstall ;;
             q|exit) ok "再见"; exit 0 ;;
             *) err "未知选项: $choice" ;;
@@ -1157,7 +1286,8 @@ main() {
             rsync)           step_run_rsync_now ;;
             counter-rescue)  step_counter_rescue ;;
             restore)         step_one_click_restore ;;
-            *) die "未知子命令: $1 (用法: status|checkpoint|rsync|counter-rescue|restore)" ;;
+            gen-license)     step_gen_license ;;
+            *) die "未知子命令: $1 (用法: status|checkpoint|rsync|counter-rescue|restore|gen-license)" ;;
         esac
         exit 0
     fi
