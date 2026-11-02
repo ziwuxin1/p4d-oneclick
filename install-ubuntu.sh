@@ -339,6 +339,88 @@ prompt_license_paste() {
     ok "已收到 license ($n 行),已保存到 /root/license"
 }
 
+# ---- Keygen 自动生成 (检测到 Keygen.exe 就走这条路, 找不到才转手动粘贴) ----
+# 参数: $1 = 输出 license 目标文件 (LICENSE_STAGED)
+# 环境变量:
+#   KEYGEN_EXE        Keygen.exe 路径 (默认自动搜索常见位置)
+#   KEYGEN_IP         License 绑定的 IP (默认取本机第一个 IP, 必须 == P4D 服务器 IP)
+#   KEYGEN_CUSTOMER   默认 admin
+#   KEYGEN_USERS      默认 1000
+#   KEYGEN_LIC_EXPIRES / KEYGEN_SUP_EXPIRES  默认 2050
+generate_license_via_keygen() {
+    local out="$1"
+    local keygen="${KEYGEN_EXE:-}"
+
+    # 1. 找 Keygen.exe: 环境变量 → 常见路径 (可先 scp Keygen.exe root@VPS:/root/)
+    if [[ -z "$keygen" ]]; then
+        local c
+        for c in /root/Keygen.exe "/root/p4d/Keygen.exe" "$HOME/Keygen.exe" \
+                 /usr/local/bin/Keygen.exe /opt/keygen/Keygen.exe ./Keygen.exe; do
+            if [[ -f "$c" ]]; then keygen="$c"; break; fi
+        done
+    fi
+    if [[ -z "$keygen" ]] && can_prompt; then
+        printf '\n%s[Keygen 自动生成 license]%s\n' "$C_CYAN" "$C_RESET"
+        printf '如果你有 Keygen.exe, 先放到服务器上 (如在 Windows:\n'
+        printf '   scp "D:\\...\\Keygen.exe" root@<VPS-IP>:/root/\n'
+        printf '然后输入它的完整路径; 直接回车 = 跳过, 转手动粘贴:\n'
+        read -r keygen < /dev/tty || keygen=""
+    fi
+    if [[ -z "$keygen" || ! -f "$keygen" ]]; then
+        warn "未找到 Keygen.exe — 转入手动粘贴选项"
+        return 1
+    fi
+
+    # 2. wine (没有就尝试装, 装不上也转手动粘贴)
+    local wine
+    wine="$(command -v wine64 || command -v wine || true)"
+    if [[ -z "$wine" ]]; then
+        info "未检测到 Wine, 正在安装 (约 2-3 分钟)..."
+        ( apt-get update -qq && apt-get install -y -qq wine64 ) >/dev/null 2>&1 \
+            || ( apt-get install -y -qq wine ) >/dev/null 2>&1 \
+            || true
+        wine="$(command -v wine64 || command -v wine || true)"
+    fi
+    if [[ -z "$wine" ]]; then
+        warn "Wine 安装失败 — 转入手动粘贴选项"
+        return 1
+    fi
+
+    # 3. 参数 (按 Keygen Method.txt: -customer admin -ip <服务器IP> -license-expires 2050 -support-expires 2050 -users 1000)
+    local ip="${KEYGEN_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+    local customer="${KEYGEN_CUSTOMER:-admin}"
+    local lic_exp="${KEYGEN_LIC_EXPIRES:-2050}"
+    local sup_exp="${KEYGEN_SUP_EXPIRES:-2050}"
+    local users="${KEYGEN_USERS:-1000}"
+    info "Keygen 参数: -customer $customer -ip $ip -license-expires $lic_exp -support-expires $sup_exp -users $users"
+
+    # 4. 在干净目录里跑, 便于认出输出文件
+    local work lic=""
+    work="$(mktemp -d)"
+    ( cd "$work" && WINEDEBUG=-all "$wine" "$keygen" \
+        -customer "$customer" -ip "$ip" \
+        -license-expires "$lic_exp" -support-expires "$sup_exp" \
+        -users "$users" ) >/dev/null 2>&1
+    local f
+    while IFS= read -r f; do lic="$f"; break; done \
+        < <(find "$work" -maxdepth 4 -type f -not -path '*/.wine*' -not -name '*.log' \
+            ! -name 'keygen-debug.*' 2>/dev/null)
+
+    if [[ -z "$lic" || ! -s "$lic" ]]; then
+        warn "Keygen 未生成 license 文件 — 转入手动粘贴选项"
+        rm -rf "$work"
+        return 1
+    fi
+
+    # 5. 校验 + 落盘 (存 /root/license, 重跑自动找到)
+    ok "Keygen 生成成功: $lic"
+    cp "$lic" "$out"
+    install -m 600 "$lic" /root/license
+    rm -rf "$work"
+    looks_like_license "$out" || { warn "生成的文件缺 license 特征字段, 请人工检查: /root/license"; }
+    return 0
+}
+
 stage_license() {
     step "2/8  License"
     LICENSE_STAGED="$(mktemp)"
@@ -358,7 +440,9 @@ stage_license() {
         cp "$found" "$LICENSE_STAGED"
         info "自动找到 license: $found"
     elif can_prompt; then
-        prompt_license_paste "$LICENSE_STAGED"
+        # 优先尝试 Keygen 自动生成 (找到 Keygen.exe + wine), 失败才转手动粘贴
+        generate_license_via_keygen "$LICENSE_STAGED" \
+            || prompt_license_paste "$LICENSE_STAGED"
     else
         die "找不到 license。放到 /root/license 后重跑,或用 --license PATH / LICENSE_URL=https://..."
     fi
