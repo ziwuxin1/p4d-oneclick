@@ -17,22 +17,27 @@
 ## 用法
 
 ```bash
-# 方式 1: license 已经 scp 到服务器的 /root/license
-curl -fsSL https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/install-ubuntu.sh | sudo LICENSE_FILE=/root/license bash
+curl -fsSL https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/install-ubuntu.sh | sudo bash
 ```
 
+就这一条命令。license 不用另外指定，脚本会自动处理：
+
+1. 依次查找 `/root/license`、`/root/license.txt`、当前目录、之前装过的位置。空文件和文件夹会跳过。
+2. 都找不到时，**直接在终端里提示你粘贴 license 内容**（用记事本打开 license，全选复制，右键粘贴，最后单独输入一行 `EOF`）。粘贴的内容会保存为 `/root/license`，重跑时不用再粘贴。
+
+也可以显式指定 license，适合无人值守的场景：
+
 ```bash
-# 方式 2: license 放在一个 https 地址上
 curl -fsSL https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/install-ubuntu.sh | sudo LICENSE_URL='https://example.com/license' bash
 ```
 
+机器上没有 curl 时，用 git：
+
 ```bash
-# 方式 3: 机器上没有 curl 时用这个
-git clone https://github.com/ziwuxin1/p4d-oneclick.git && sudo bash p4d-oneclick/install-ubuntu.sh --license /root/license
+git clone https://github.com/ziwuxin1/p4d-oneclick.git && sudo bash p4d-oneclick/install-ubuntu.sh
 ```
 
-如果机器上没有 curl，脚本会自动安装（`apt install curl ca-certificates`，失败时改用 `--reinstall`）。
-方式 1 和方式 2 本身要靠 curl 才能拉下脚本。机器上完全没有 curl 时，请用方式 3，或者先手动执行 `apt install -y curl`。
+脚本运行过程中如果发现 curl 不可用，会自动安装（`apt install curl ca-certificates`，失败时改用 `--reinstall`）。
 
 ### 选项
 

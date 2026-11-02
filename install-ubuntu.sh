@@ -94,7 +94,7 @@ P4D One-Click — Ubuntu 全自动部署
 
 用法: sudo bash install-ubuntu.sh [选项]
 
-License(必须二选一,或已经装过):
+License(都不给时自动找 /root/license 等位置,还找不到就提示你粘贴):
   --license PATH            本机上的 license 文件
   --license-url URL         从 URL 下载 license(https)
 
@@ -299,30 +299,73 @@ check_port_free() {
 #  2. License — 必须提供,先验证再装
 # ============================================================
 
+# 看起来像 Perforce license: 非空 + 有典型字段
+looks_like_license() {
+    [[ -s "$1" ]] && grep -qE '^(License|IPaddress|Users|Customer):' "$1"
+}
+
+# 自动搜索常见位置,只接受看起来有效的文件(空文件 / 文件夹跳过)
+find_license() {
+    local c
+    for c in /root/license /root/license.txt ./license ./license.txt \
+             "${INSTALL_TEMP}/license" "${P4ROOT}/license"; do
+        if [[ -f "$c" ]] && looks_like_license "$c"; then
+            printf '%s' "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# curl | bash 时 stdin 是管道,只能从 /dev/tty 读用户输入
+can_prompt() { { : < /dev/tty; } 2>/dev/null; }
+
+prompt_license_paste() {
+    local out="$1" line n=0
+    printf '\n%s没找到 license 文件。%s\n' "$C_YELLOW" "$C_RESET"
+    printf '请用记事本打开 Perforce 发给你的 license,全选复制,然后在这里右键粘贴。\n'
+    printf '粘贴完后,单独输入一行 %sEOF%s 回车 (或按 Ctrl+D) 结束:\n\n' "$C_BOLD" "$C_RESET"
+    : > "$out"
+    while IFS= read -r line < /dev/tty; do
+        line="${line%$'\r'}"
+        [[ "$line" == "EOF" ]] && break
+        printf '%s\n' "$line" >> "$out"
+        n=$(( n + 1 ))
+    done
+    (( n > 0 )) || die "没有粘贴任何内容"
+    looks_like_license "$out" || die "粘贴的内容不像 Perforce license (缺少 License:/IPaddress:/Users: 字段)"
+    # 存一份到 /root/license,重跑时自动找到,不用再粘贴
+    install -m 600 "$out" /root/license
+    ok "已收到 license ($n 行),已保存到 /root/license"
+}
+
 stage_license() {
     step "2/8  License"
     LICENSE_STAGED="$(mktemp)"
     chmod 600 "$LICENSE_STAGED"
 
+    local found=""
     if [[ -n "$LICENSE_FILE" ]]; then
         [[ -f "$LICENSE_FILE" ]] || die "license 文件不存在: $LICENSE_FILE"
         cp "$LICENSE_FILE" "$LICENSE_STAGED"
-        info "使用本地 license: $LICENSE_FILE"
+        info "使用指定的 license: $LICENSE_FILE"
     elif [[ -n "$LICENSE_URL" ]]; then
         [[ "$LICENSE_URL" == https://* ]] || die "LICENSE_URL 必须是 https://"
         curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 "$LICENSE_URL" -o "$LICENSE_STAGED" \
             || die "下载 license 失败: $(redact_url "$LICENSE_URL")"
         info "已下载 license"
-    elif license_present; then
-        cp "$P4ROOT/license" "$LICENSE_STAGED"
-        info "未指定 license,沿用已安装的 $P4ROOT/license (重跑)"
+    elif found="$(find_license)"; then
+        cp "$found" "$LICENSE_STAGED"
+        info "自动找到 license: $found"
+    elif can_prompt; then
+        prompt_license_paste "$LICENSE_STAGED"
     else
-        die "必须提供 license: --license /path/to/license 或 LICENSE_URL=https://..."
+        die "找不到 license。放到 /root/license 后重跑,或用 --license PATH / LICENSE_URL=https://..."
     fi
 
-    [[ -s "$LICENSE_STAGED" ]] || die "license 文件是空的"
-    grep -qE '^(License|IPaddress|Users|Customer):' "$LICENSE_STAGED" \
-        || die "这不像 Perforce license 文件(缺少 License:/IPaddress:/Users: 字段)"
+    [[ -s "$LICENSE_STAGED" ]] || die "license 是空的"
+    looks_like_license "$LICENSE_STAGED" \
+        || die "这不像 Perforce license (缺少 License:/IPaddress:/Users: 字段)"
 
     local lic_ip users
     lic_ip="$(awk '/^IPaddress:/ {print $2; exit}' "$LICENSE_STAGED" | cut -d: -f1)"
