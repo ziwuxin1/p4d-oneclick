@@ -4,3 +4,4 @@ license
 *credentials*.txt
 .p4_admin_passwd
 *.log
+!/LICENSE
