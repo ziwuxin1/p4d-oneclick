@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 #
 # SSH Toolkit (Linux) — Perforce P4D 一键运维脚本
-# Version: 1.1.0
+# Version: 1.2.1
 # Target: P4D 2024.1 on Ubuntu 22.04 / 24.04
 #
 # 用法:
 #   sudo bash ssh-toolkit.sh           # 交互菜单
 #   sudo bash ssh-toolkit.sh status    # 非交互:状态
 #   sudo bash ssh-toolkit.sh checkpoint # 非交互:立刻 checkpoint
+#   sudo bash p4d-toolkit.sh fresh-install  # 🚀 非交互:一键全新部署
+#   sudo bash p4d-toolkit.sh gen-license    # 一键生成 license (keygen.exe via wine)
+#   sudo bash p4d-toolkit.sh set-admin-pw   # 👤 单独设置/修改 admin 密码
 #
 # 设计原则:
 #   - 100% 基于 P4D-Migration-Complete-Guide.md 那份指南
@@ -24,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.1.1"
+readonly TOOLKIT_VERSION="1.2.1"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -445,13 +448,14 @@ step_setup_systemd_with_rescue() {
     section "配置 systemd + 启动自愈 hook"
 
     if [[ ! -s "$P4D_ADMIN_PASSWD_FILE" ]]; then
-        info "创建 admin 密码文件 $P4D_ADMIN_PASSWD_FILE"
-        # 无人值守: install-ubuntu.sh 通过 P4D_ADMIN_PASSWORD 传入(自动生成的强密码)
         local pw="${P4D_ADMIN_PASSWORD:-}"
         if [[ -z "$pw" ]]; then
-            read -r -s -p "请输入 admin 密码 (会保存到只 root 可读的文件): " pw; echo
+            pw="p4d-$(openssl rand -base64 12 | tr -d '/+=')"
+            info "P4D_ADMIN_PASSWORD 未提供 — admin 随机初始密码已生成 (仅存于 $P4D_ADMIN_PASSWD_FILE)"
+            info "提示: 部署流程末尾会引导你设置自己的 admin 密码; 随时可用菜单 [18] 修改"
+        else
+            info "admin 初始密码来自 P4D_ADMIN_PASSWORD → 已写入 $P4D_ADMIN_PASSWD_FILE"
         fi
-        # umask 077: 文件从创建那一刻起就只有属主可读
         ( umask 077; printf '%s' "$pw" > "$P4D_ADMIN_PASSWD_FILE" )
         chown "$P4D_USER:$P4D_USER" "$P4D_ADMIN_PASSWD_FILE"
         chmod 600 "$P4D_ADMIN_PASSWD_FILE"
@@ -1073,15 +1077,61 @@ find_wine() {
     return 1
 }
 
+# 确保 wine 可用: 已有就返回; 没有就按发行版自动装 (apt/dnf/yum/zypper, 需 root)。
+# 返回 wine 命令名 (无换行); 失败返 1, 调用方自己给提示。
+ensure_wine() {
+    local w
+    if w="$(find_wine)"; then
+        printf "%s" "$w"
+        return 0
+    fi
+
+    # 非 root 装不了包 → 交给用户 (提示由调用方给)
+    [[ "$(id -u)" == "0" ]] || return 1
+
+    local mgr=""
+    if   command -v apt-get >/dev/null 2>&1; then mgr="apt"
+    elif command -v dnf     >/dev/null 2>&1; then mgr="dnf"
+    elif command -v yum     >/dev/null 2>&1; then mgr="yum"
+    elif command -v zypper  >/dev/null 2>&1; then mgr="zypper"
+    else
+        return 1
+    fi
+
+    info "未装 wine — 自动安装中 (${mgr}; 约几百 MB, 1-3 分钟) ..." >&2
+    local log rc=0
+    case "$mgr" in
+        apt)
+            log="$({ DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>&1 || true;
+                     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wine wine64 2>&1; })"
+            rc=$? ;;
+        dnf)    log="$(dnf install -y wine 2>&1)";                     rc=$? ;;
+        yum)    log="$(yum install -y wine 2>&1)";                     rc=$? ;;
+        zypper) log="$(zypper --non-interactive install -y wine 2>&1)"; rc=$? ;;
+    esac
+
+    if w="$(find_wine)"; then
+        ok "wine 已装好" >&2
+        printf "%s" "$w"
+        return 0
+    fi
+
+    if [[ -n "$log" ]]; then
+        err "wine 自动安装失败 (${mgr}) — 日志尾部:"
+        err "  $(printf "%s" "$log" | tail -4 | tr '\n' ' ')" >&2
+    fi
+    return 1
+}
+
 step_gen_license() {
     section "License 一键生成 (Keygen.exe via wine) + 自动导入"
 
-    # -- 1. wine --
+    # -- 1. wine (缺了就自动装) --
     local wine
-    if ! wine="$(find_wine)"; then
-        err "未装 wine,跑不了 Keygen.exe"
-        info "安装命令 (Ubuntu / WSL2 都适用): sudo apt update && sudo apt install -y wine wine64"
-        info "装完重跑本菜单项即可 (Keygen.exe 是 64 位,不需要 wine32)"
+    if ! wine="$(ensure_wine)"; then
+        err "wine 未安装, 自动安装也没成功"
+        info "手动装: sudo apt update && sudo apt install -y wine wine64 (Keygen.exe 是 64 位, 不需要 wine32)"
+        info "装完重跑本菜单项即可"
         return 1
     fi
     ok "wine: $(command -v "$wine") — $($wine --version 2>/dev/null | head -1)"
@@ -1194,6 +1244,199 @@ step_uninstall() {
 }
 
 # ============================================================
+#  一键全新部署 (fresh install, v1.2.0 新增)
+# ============================================================
+
+step_open_firewall_port() {
+    local port="$P4PORT"
+    # ── 1) ufw (Ubuntu/Debian 默认) ──
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw status 2>/dev/null | grep -E "^[[:space:]]*${port}/tcp" | grep -qi "ALLOW"; then
+            ok "ufw: 端口 ${port}/tcp 已开放, 跳过"
+        elif ufw allow "${port}/tcp" >/dev/null 2>&1; then
+            ok "ufw: 已开放 ${port}/tcp (内网客户端可直连)"
+        else
+            warn "ufw: 开放 ${port}/tcp 失败 (防火墙可能未启用, 请手动确认)"
+        fi
+        return 0
+    fi
+    # ── 2) firewalld (RHEL/CentOS/Rocky) ──
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+        if firewall-cmd --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "${port}/tcp"; then
+            ok "firewalld: 端口 ${port}/tcp 已开放, 跳过"
+        elif firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 \
+             && firewall-cmd --reload >/dev/null 2>&1; then
+            ok "firewalld: 已开放 ${port}/tcp"
+        else
+            warn "firewalld: 开放 ${port}/tcp 失败, 请手动确认"
+        fi
+        return 0
+    fi
+    # ── 3) 无防火墙框架 → 可能是安全组 ──
+    info "未检测到 ufw / firewalld — 如用云防火墙(安全组), 请自行放行 ${port}/tcp"
+}
+
+step_show_access_info() {
+    local my_ip
+    my_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    my_ip="${my_ip:-<本机IP>}"
+
+    echo
+    cat <<INFO
+
+  ${C_BOLD}${C_CYAN}── 内网接入 (局域网直连) ──${C_RESET}
+  • P4D 监听: ${C_BOLD}${my_ip}:${P4PORT}${C_RESET}
+  • 客户端 (Linux/macOS/WSL):
+      p4 set P4PORT=${my_ip}:${P4PORT}
+      p4 -p ${my_ip}:${P4PORT} info
+  • Windows P4V / TortoiseP4V: Server 一栏填 ${my_ip}:${P4PORT}
+
+  ${C_BOLD}${C_CYAN}── 外网接入 (家庭宽带) — 必须手动做两步 ──${C_RESET}
+  ⚠ 家庭宽带拿不到公网直连 IP, 内网 IP 从外网不可达, 必须:
+    1. 路由器端口映射: 外网高端口(如 1888) → ${my_ip}:${P4PORT}
+       (运营商常封 80/443/5060, 建议用 1888 这类高端口)
+    2. 动态域名解析 (DDNS): 宽带 IP 会变, 需 DDNS 持续刷新域名
+       - 路由器自带 DDNS (花生壳 / DynDNS)
+       - 或 ddns-go + DNSPod / Cloudflare 等
+  完成后客户端连接: p4 -p 你的域名:1888 ... (P4V: Server=你的域名:1888)
+  排障口诀: 外网连不上 → 先查「路由器映射 + DDNS 是否生效」, 再查 P4D 服务状态
+
+  ${C_BOLD}${C_CYAN}── 账号和密码 ──${C_RESET}
+  • 日常登录账号: ${C_BOLD}admin${C_RESET}  (密码: 你刚设置的那个)
+  • 忘了/要改: 菜单 [18] 设置/修改 admin 密码, 或 sudo bash p4d-toolkit.sh set-admin-pw
+  • 其他同事也要用: 用 admin 建独立 superuser 账号分给各自使用:
+    ${C_BOLD}p4 -p ${my_ip}:${P4PORT} user -o <名字> -a superuser${C_RESET}  # 建账号
+    ${C_BOLD}p4 -p ${my_ip}:${P4PORT} -u <名字> passwd${C_RESET}         # 设该账号密码
+
+  ${C_BOLD}${C_CYAN}── 客户端工作站初始化 (首次连接示例) ──${C_RESET}
+      p4 set P4USER=myadmin
+      p4 set P4CLIENT=ws-\$(hostname)
+      p4 set P4TICKETS=/tmp/.t
+      p4 users -o ${C_BOLD}ws-\$(hostname)${C_RESET}      # 首连时手动建 workspace
+      p4 clients -o ws-\$(hostname) -f
+
+INFO
+    echo
+}
+
+# ============================================================
+#  设置 admin 密码 (v1.2.1 新增)
+#  场景:
+#   a. 一键全新部署的最后一步 (step_fresh_install 自动调用)
+#   b. 日常改密码 (菜单 #18 / CLI set-admin-pw)
+#  流程: 显示账号 admin (已预填) → 提示'请输入 admin 的密码' → 两遍确认
+#        → 写入密码文件 (P4D 未跑) / p4 passwd 实时生效 (P4D 在跑) → 验证登录
+#  原则: admin 是日常主账号; 其他人员需要访问时, 用 admin 再建独立 superuser 账号
+# ============================================================
+step_set_admin_password() {
+    local pw1="" pw2=""
+
+    echo
+    printf "  ${C_BOLD}账号: ${C_CYAN}admin${C_RESET}   (P4D 内置超级用户, 日常登录主账号)\n"
+    printf "  其他同事也要用 P4D? 之后可用 admin 再建独立 superuser 账号分给各自使用\n"
+    echo
+    printf "  ${C_YELLOW}请输入 admin 的密码 (输入不回显):${C_RESET}\n"
+
+    local ok_pw=0
+    for i in 1 2 3; do
+        read -r -s -p "  ${C_BOLD}密码 (建议 ≥16 位, 大小写+数字+符号)${C_RESET} > " pw1 || pw1=""
+        echo
+        if [[ -z "$pw1" ]]; then warn "密码不能为空"; sleep 1; continue; fi
+        read -r -s -p "  ${C_BOLD}再输一次确认${C_RESET} > " pw2 || pw2=""
+        echo
+        if [[ "$pw1" == "$pw2" ]]; then ok_pw=1; break; else warn "两次输入不一致, 请重试"; fi
+    done
+    [[ $ok_pw -eq 1 ]] || { warn "已跳过 admin 密码设置 (稍后用菜单 [18] 或 CLI set-admin-pw)"; return 0; }
+    export P4D_ADMIN_PASSWORD="$pw1"
+
+    # ── 无论 P4D 是否运行, 先落密码文件 (systemd ExecStop 自愈要用它 login) ──
+    if ! su -s /bin/sh "$P4D_USER" -c "test -f $P4D_ADMIN_PASSWD_FILE" 2>/dev/null; then
+        mkdir -p "$(dirname "$P4D_ADMIN_PASSWD_FILE")"
+        umask 077
+        printf '%s' "$pw1" > "$P4D_ADMIN_PASSWD_FILE"
+        chmod 600 "$P4D_ADMIN_PASSWD_FILE"
+        chown "$P4D_USER" "$P4D_ADMIN_PASSWD_FILE"
+    fi
+
+    # ── P4D 运行中? 实时生效 + 验证 ──
+    local P4PORT_LIVE="${P4PORT:-${P4PORT_DEFAULT}}"
+    if timeout 2 bash -c ">/dev/tcp/127.0.0.1/${P4PORT_LIVE}" 2>/dev/null; then
+        if su -s /bin/sh "$P4D_USER" -c "printf '%s' '$pw1' | p4 -p localhost:${P4PORT_LIVE} passwd" 2>/dev/null; then
+            ok "admin 密码已实时生效"
+        else
+            warn "p4 passwd 未生效 (admin 可能是出厂空密码, 首次设置行为不同), 请手动:"
+            warn "   printf '<密码>' | p4 -p localhost:${P4PORT_LIVE} passwd"
+        fi
+        rm -f /tmp/.p4tickets_admin
+        if printf '%s' "$pw1" | su -s /bin/sh "$P4D_USER" -c "P4TICKETS=/tmp/.p4tickets_admin p4 -p localhost:${P4PORT_LIVE} -u admin login" 2>/dev/null && [[ -f /tmp/.p4tickets_admin ]]; then
+            ok "✅ admin 登录验证通过 (新密码可用)"
+        else
+            warn "⚠ 新密码 login 验证未通过 — 请用手动命令设置, 或菜单 [7] 体检后再试"
+        fi
+    else
+        info "P4D 当前未运行 — 密码已写入 $P4D_ADMIN_PASSWD_FILE, 下次启动后可用菜单 [7] 体检"
+    fi
+
+    echo
+    info "记住: 账号 admin / 密码你刚设置的。其他人员需要时, 用 admin 建独立账号 (p4 users -o <名字> -a superuser)"
+    echo
+}
+
+step_fresh_install() {
+    echo
+    printf "  ${C_BOLD}${C_CYAN}══ 🚀 一键全新部署 (工作区→安装→license→systemd→cron→端口/账号) ══${C_RESET}\n"
+
+    if p4d_installed; then
+        warn "检测到 P4D 已安装 / 已有数据库"
+        warn " - 继续部署会重装二进制并覆盖配置; initdb 已做过则跳过, 不会丢数据(但建议先确认备份)"
+        warn " - 如果是'迁移坏了想修', 走 [11] 一键恢复 或 [10] Counter 救援, 不要走本项"
+    fi
+
+    echo
+    info "本步骤将依次执行 (每步可重入):"
+    info "   1. 建工作目录 + 下载 P4D 安装包 (已下载则跳过)"
+    info "   2. 安装 P4D ${P4D_VERSION} 二进制 + initdb 初始化数据库"
+    info "   3. 安装 license 文件"
+    info "   4. 配置 systemd 服务 + 启动自愈 hook (疫苗)"
+    info "   5. 配置每日 03:00 checkpoint cron (本地 + NAS)"
+    info "   6. 配置防火墙, 放行 ${P4PORT}/tcp"
+    info "   7. 设置 admin 密码 (账号: admin) + 输出内网/外网接入指引"
+    echo
+    read -r -p "$(printf "  ${C_YELLOW}确认继续? [Y/n] ${C_RESET}")" ans
+    ans="${ans:-Y}"
+    [[ "$ans" =~ ^[Yy]$ ]] || { warn "已取消"; return 0; }
+
+    # ── 已装环境: 先自动打一次 checkpoint 保底 ──
+    if p4d_installed; then
+        info "已存在 P4D 环境 → 先打一次本地 checkpoint 作备份兜底"
+        step_run_checkpoint_now || warn "checkpoint 备份失败 (仍可继续, 风险自担)"
+    fi
+
+    # ── 全链路 (任一步失败即停) ──
+    step_prepare_workspace            || { err "① 工作区/下载失败, 终止"; return 1; }
+    step_install_p4d                  || { err "② P4D 安装失败, 终止";   return 1; }
+    step_install_license              || { err "③ license 安装失败, 终止"; return 1; }
+    step_setup_systemd_with_rescue    || { err "④ systemd 配置失败, 终止"; return 1; }
+    step_setup_cron_checkpoint        || { err "⑤ cron 配置失败, 终止";   return 1; }
+
+    # ── 端口 + admin 密码 + 接入指引 ──
+    step_open_firewall_port
+    step_set_admin_password              || warn "admin 密码未设置 (稍后可用菜单 [18])"
+    step_show_access_info
+
+    # ── 收尾体检 ──
+    step_health_check
+
+    echo
+    ok "🚀 一键全新部署流程跑完! 🎉"
+    echo
+    info "你的登录方式: ${C_BOLD}p4 -p ${my_ip:-<服务器IP>}:${P4PORT} -u admin login${C_RESET}  (admin / 你刚设置的密码)"
+    info "接下来 (人工, 仅外网需要):"
+    info "   • 要外网接入: 路由器做端口映射 + 配 DDNS, 再用'域名:端口'连接客户端"
+    info "   • 验证: p4 -p ${P4PORT} info 应显示 License 有效 + Server 运行中"
+}
+
+# ============================================================
 #  MENU
 # ============================================================
 
@@ -1206,34 +1449,31 @@ main_menu() {
         echo
         cat <<MENU
 
-  ${C_BOLD}── 准备 ──${C_RESET}
-  0) 一键创建工作目录 + 下载安装包(创建 /root/P4_Temp 并从 GitHub 拉 tgz)
-
   ${C_BOLD}── 部署 ──${C_RESET}
-  1) 全新安装 P4D ${P4D_VERSION}
-  2) 安装 license 文件
-  3) 配置 systemd 服务 + 启动自愈 hook
-  4) 配置每日 03:00 checkpoint cron 备份
-  5) 一次性全部部署 (0→1→2→3→4)
+  1) 🚀 一键全新部署 (推荐: 全链路 + 防火墙 + 端口/账号指引)
+  2) 一键创建工作目录 + 下载安装包 (创建 /root/P4_Temp 并从 GitHub 拉 tgz)
+  3) 全新安装 P4D ${P4D_VERSION} (二进制 + initdb)
+  4) 安装 license 文件
+  5) 配置 systemd 服务 + 启动自愈 hook
+  6) 配置每日 03:00 checkpoint cron 备份
 
-  ${C_BOLD}── 救援 ──${C_RESET}
-  6) Counter 救援 (license 炸了用)
-  7) 一键恢复 (从备份 checkpoint+journal)
-
-  ${C_BOLD}── 体检 / 状态 ──${C_RESET}
-  10) 健康体检
-  11) 备份状态
-  12) systemd journal 日志
+  ${C_BOLD}── 体检 ──${C_RESET}
+  7) 健康体检
+  8) 备份 / 还原状态
+  9) systemd journal 日志
 
   ${C_BOLD}── 维护 ──${C_RESET}
-  13) 立刻生成 checkpoint
-  14) 立刻 rsync 到 NAS (checkpoint + depot 一次推完)
-  15) 启动服务
-  16) 停止服务
-  17) 重启服务
-  18) 一键生成 license (keygen.exe via wine) + 自动导入
+  10) Counter 救援 (license 炸了用)
+  11) 一键恢复 (从备份 checkpoint+journal)
+  12) 启动服务
+  13) 停止服务
+  14) 重启服务
+  15) 立刻生成 checkpoint
+  16) 立刻 rsync 到 NAS (checkpoint + depot 一次推完)
+  17) 一键生成 license (keygen.exe via wine) + 自动导入
+  18) 设置/修改 admin 密码 (账号: admin, 日常主账号)
 
-  ${C_BOLD}── 危险区 ──${C_RESET}
+  ${C_BOLD}── 卸载 ──${C_RESET}
   99) 卸载 P4D + Toolkit
 
   q) 退出
@@ -1243,23 +1483,24 @@ MENU
         read -r -p "$(printf "${C_CYAN}选择: ${C_RESET}")" choice
         echo
         case "$choice" in
-            0)  step_prepare_workspace ;;
-            1)  step_install_p4d ;;
-            2)  step_install_license ;;
-            3)  step_setup_systemd_with_rescue ;;
-            4)  step_setup_cron_checkpoint ;;
-            5)  step_prepare_workspace && step_install_p4d && step_install_license && step_setup_systemd_with_rescue && step_setup_cron_checkpoint ;;
-            6)  step_counter_rescue ;;
-            7)  step_one_click_restore ;;
-            10) step_health_check ;;
-            11) step_show_backup_status ;;
-            12) step_view_journal ;;
-            13) step_run_checkpoint_now ;;
-            14) step_run_rsync_now ;;
-            15) systemctl start "$SVC_NAME" && ok "已启动" ;;
-            16) systemctl stop  "$SVC_NAME" && ok "已停止" ;;
-            17) systemctl restart "$SVC_NAME" && ok "已重启" ;;
-            18) step_gen_license ;;
+            1)  step_fresh_install ;;
+            2)  step_prepare_workspace ;;
+            3)  step_install_p4d ;;
+            4)  step_install_license ;;
+            5)  step_setup_systemd_with_rescue ;;
+            6)  step_setup_cron_checkpoint ;;
+            7)  step_health_check ;;
+            8)  step_show_backup_status ;;
+            9)  step_view_journal ;;
+            10) step_counter_rescue ;;
+            11) step_one_click_restore ;;
+            12) systemctl start   "$SVC_NAME" && ok "已启动" ;;
+            13) systemctl stop    "$SVC_NAME" && ok "已停止" ;;
+            14) systemctl restart "$SVC_NAME" && ok "已重启" ;;
+            15) step_run_checkpoint_now ;;
+            16) step_run_rsync_now ;;
+            17) step_gen_license ;;
+            18) step_set_admin_password ;;
             99) step_uninstall ;;
             q|exit) ok "再见"; exit 0 ;;
             *) err "未知选项: $choice" ;;
@@ -1287,7 +1528,9 @@ main() {
             counter-rescue)  step_counter_rescue ;;
             restore)         step_one_click_restore ;;
             gen-license)     step_gen_license ;;
-            *) die "未知子命令: $1 (用法: status|checkpoint|rsync|counter-rescue|restore|gen-license)" ;;
+            fresh-install)   step_fresh_install ;;
+            set-admin-pw)    step_set_admin_password ;;
+            *) die "未知子命令: $1 (用法: status|checkpoint|rsync|counter-rescue|restore|gen-license|fresh-install|set-admin-pw)" ;;
         esac
         exit 0
     fi
