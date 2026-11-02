@@ -17,18 +17,22 @@
 ## 用法
 
 ```bash
-# 方式 1: license 已经 scp 到服务器上
-git clone https://github.com/ziwuxin1/p4d-oneclick.git
-cd p4d-oneclick
-sudo bash install-ubuntu.sh --license /root/license
+# 方式 1: license 已经 scp 到服务器的 /root/license
+curl -fsSL https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/install-ubuntu.sh | sudo LICENSE_FILE=/root/license bash
+```
 
-# 方式 2: 一条命令（license 放在一个 https 地址上）
-curl -fsSL https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/install-ubuntu.sh \
-  | sudo LICENSE_URL='https://example.com/license' bash
+```bash
+# 方式 2: license 放在一个 https 地址上
+curl -fsSL https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/install-ubuntu.sh | sudo LICENSE_URL='https://example.com/license' bash
+```
+
+```bash
+# 方式 3: 机器上没有 curl 时用这个
+git clone https://github.com/ziwuxin1/p4d-oneclick.git && sudo bash p4d-oneclick/install-ubuntu.sh --license /root/license
 ```
 
 如果机器上没有 curl，脚本会自动安装（`apt install curl ca-certificates`，失败时改用 `--reinstall`）。
-方式 2 本身要靠 curl 才能拉下脚本。机器上完全没有 curl 时，请用方式 1，或者先手动执行 `apt install -y curl`。
+方式 1 和方式 2 本身要靠 curl 才能拉下脚本。机器上完全没有 curl 时，请用方式 3，或者先手动执行 `apt install -y curl`。
 
 ### 选项
 
