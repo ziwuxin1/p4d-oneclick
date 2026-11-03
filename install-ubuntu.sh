@@ -375,20 +375,52 @@ generate_license_via_keygen() {
             rm -f -- "$c" 2>/dev/null
         done
     fi
-    # 自动下载 (公开仓库, 匿名可用) — VPS 零手动步骤
-    if [[ -z "$keygen" ]] && command -v curl >/dev/null 2>&1; then
+    # ── 诊断日志: 每个关键决策都记录, 出问题只需 cat /var/log/p4d-keygen.log ──
+    local KLOG=/var/log/p4d-keygen.log
+    { : > "$KLOG"; } 2>/dev/null || KLOG=/tmp/p4d-keygen.log
+    klog() { { printf '%s | %s\n' "$(date '+%F %T')" "$1" >>"$KLOG"; } 2>/dev/null; }
+    klog "=== keygen 诊断日志 @ $(date '+%F %T') ==="
+    klog "who=$(id -un 2>/dev/null) cwd=$(pwd) HOME=$HOME"
+    klog "PATH=$PATH"
+    klog "curl:  $(command -v curl 2>/dev/null || echo NOT_FOUND_IN_PATH)"
+    klog "wget:  $(command -v wget 2>/dev/null || echo NOT_FOUND_IN_PATH)"
+    klog "wine:  $(command -v wine64 2>/dev/null || command -v wine 2>/dev/null || echo NOT_FOUND_IN_PATH)"
+
+    # 下载 (公开仓库, 匿名可用) — 绝对路径定位工具, 规避 sudo 精简 PATH; curl/wget 双保险
+    if [[ -z "$keygen" ]]; then
+        local CURL_BIN WGET_BIN
+        CURL_BIN="$(command -v curl 2>/dev/null || ls /usr/bin/curl /usr/local/bin/curl /bin/curl 2>/dev/null | head -n1 || true)"
+        WGET_BIN="$(command -v wget 2>/dev/null || ls /usr/bin/wget /bin/wget 2>/dev/null | head -n1 || true)"
+        klog "resolve: curl=${CURL_BIN:-none} wget=${WGET_BIN:-none}"
         local url="${KEYGEN_URL:-https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/tools/Keygen.bin}"
-        info "本地无 Keygen, 自动下载中 (约 0.8MB)..."
-        if curl -fsSL --retry 1 --max-time 120 -o /root/Keygen.bin "$url" </dev/null 2>/tmp/.keygen_dl.err; then
-            keygen=/root/Keygen.bin
-            dl_keygen=1
+        local dl_ok=0
+        if [[ -n "$CURL_BIN" ]]; then
+            info "本地无 Keygen, 用 $CURL_BIN 自动下载 (约 0.8MB)..."
+            if "$CURL_BIN" -fsSL --retry 1 --max-time 120 -o /root/Keygen.bin "$url" </dev/null 2>/tmp/.keygen_dl.err; then
+                dl_ok=1
+                klog "curl: 下载成功"
+            else
+                klog "curl: 失败 → $(tr '\n' ' ' < /tmp/.keygen_dl.err 2>/dev/null | cut -c1-400)"
+                info "curl 下载失败, 试 wget..."
+            fi
             rm -f /tmp/.keygen_dl.err
-            ok "已下载 Keygen → /root/Keygen.bin"
         else
-            warn "Keygen 自动下载失败 (网络/仓库被拦), 详细错误:"
-            sed 's/^/    /' /tmp/.keygen_dl.err 2>/dev/null | tail -n 5
-            rm -f /tmp/.keygen_dl.err
-            warn "常见: 云服务器防火墙拦 GitHub / 无外网。可先 scp 一个有效 Keygen.exe 到 /root/ 再重跑"
+            klog "curl: 未找到 (PATH 和常见目录都没有)"
+            info "未检测到 curl, 试 wget..."
+        fi
+        if (( ! dl_ok )) && [[ -n "$WGET_BIN" ]]; then
+            if "$WGET_BIN" -T 120 -O /root/Keygen.bin "$url" </dev/null; then
+                dl_ok=1
+                klog "wget: 下载成功"
+            else
+                klog "wget: 失败"
+            fi
+        fi
+        if (( dl_ok )); then
+            keygen_ok /root/Keygen.bin && { keygen=/root/Keygen.bin; dl_keygen=1; ok "已下载 Keygen → /root/Keygen.bin"; }             || { warn "下载文件校验失败, 删除重来"; rm -f /root/Keygen.bin; klog "校验 keygen_ok 失败: $(stat -c%s /root/Keygen.bin 2>/dev/null) bytes"; }
+        else
+            warn "Keygen 自动下载失败 (curl/wget 不可用或网络不通)"
+            klog "结果: 下载全部失败 — 可 scp 一个有效 Keygen.exe 到 /root/ 后重跑"
         fi
     fi
     if [[ -z "$keygen" ]] && can_prompt; then
@@ -398,6 +430,7 @@ generate_license_via_keygen() {
     fi
     if [[ -z "$keygen" || ! -f "$keygen" ]]; then
         warn "未找到 Keygen.exe — 转入手动粘贴选项"
+        warn "=== 诊断日志(贴出来可秒定位): cat $KLOG ==="
         return 1
     fi
 
