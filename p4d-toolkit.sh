@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.7"
+readonly TOOLKIT_VERSION="1.2.8"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -1639,7 +1639,7 @@ step_set_admin_password() {
     # security=2 的强密码规则: ≥8 位, 且含大小写混合或数字/符号
     local pw1="" pw2=""
     while true; do
-        pw1="$(_ask "输入 admin 新密码 (≥8位, 含大小写或数字) " "")"
+        pw1="$(_ask "输入 admin 新密码 (≥8位, 大写/小写/数字至少两类) " "")"
         if [[ ${#pw1} -lt 8 ]]; then
             echo "  ⚠ 至少 8 位 (P4D security=2 要求)"; continue
         fi
