@@ -134,6 +134,29 @@ confirm() {
     [[ "$reply" =~ ^[Yy]$ ]]
 }
 
+_ask() {
+    # _ask "提示语" [默认值]
+    # 密码式静默读取 (read -s, 不回显), 结果写到 stdout
+    # - P4D_ASSUME_YES=1 或无 TTY (curl|bash 等) → 直接返回默认值, 不阻塞
+    # - 有键盘时: 显示提示符, 静默输入; 直接回车 = 用默认值
+    local prompt="$1" default="${2-}"
+    local ans=""
+    if [[ "${P4D_ASSUME_YES:-0}" == "1" ]] || [[ ! -t 0 ]]; then
+        printf '%s' "$default"
+        return 0
+    fi
+    set +H
+    if [[ -n "$default" ]]; then
+        read -rsp "$(printf "${C_YELLOW:-}?${C_RESET:-}  %s [直接回车 = 默认] " "$prompt")" ans || ans="$default"
+    else
+        read -rsp "$(printf "${C_YELLOW:-}?${C_RESET:-}  %s " "$prompt")" ans || ans=""
+    fi
+    printf '\n'
+    [[ -n "$ans" ]] || ans="$default"
+    printf '%s' "$ans"
+    return 0
+}
+
 require_confirm_text() {
     # require_confirm_text "Type CONFIRM to proceed: " "CONFIRM"
     local prompt="$1"
