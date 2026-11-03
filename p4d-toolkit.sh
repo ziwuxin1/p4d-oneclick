@@ -1539,7 +1539,8 @@ _auto_reset_admin_pw() {
     _sync_admin_pw_to_credentials_file "$new"
     return 0
   fi
-  echo "  [重置] admin 当前已有密码, 而保存的旧密码都不对 — 无法不知道旧密码就改密" >&2
+  echo "  [重置] P4D 没接受新密码, 它的回复:" >&2
+  printf '%s\n' "${_P4_LAST_OUT:-（无输出）}" | grep -v '^Enter\|^Re-enter' | sed 's/^/      /' >&2
   return 1
 }
 
@@ -1643,8 +1644,13 @@ step_set_admin_password() {
         if [[ ${#pw1} -lt 8 ]]; then
             echo "  ⚠ 至少 8 位 (P4D security=2 要求)"; continue
         fi
-        if [[ "$pw1" =~ ^[a-z]+$ || "$pw1" =~ ^[A-Z]+$ ]]; then
-            echo "  ⚠ 不能全是同一种大小写字母, 加点数字或换大小写"; continue
+        # P4D 强密码: 大写 / 小写 / 非字母 三类里至少占两类 (纯数字也不行)
+        local _cls=0
+        [[ "$pw1" =~ [a-z] ]] && _cls=$((_cls + 1))
+        [[ "$pw1" =~ [A-Z] ]] && _cls=$((_cls + 1))
+        [[ "$pw1" =~ [^a-zA-Z] ]] && _cls=$((_cls + 1))
+        if [[ $_cls -lt 2 ]]; then
+            echo "  ⚠ 大写/小写/数字符号 至少要两类, 比如 Perforce2026"; continue
         fi
         pw2="$(_ask "再输入一次确认 (不回显) " "")"
         [[ "$pw2" == "$pw1" ]] && break
