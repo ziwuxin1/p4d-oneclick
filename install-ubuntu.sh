@@ -986,6 +986,12 @@ main() {
     configure_firewall
     write_credentials
     print_summary
+
+    # 部署完直接弹出数字菜单 (交互式终端才弹; curl|bash 管道无 tty 时自动跳过, 不卡死)
+    if [[ -t 0 ]]; then
+        echo
+        main_menu
+    fi
 }
 
 main "$@"
