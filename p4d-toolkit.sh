@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.1"
+readonly TOOLKIT_VERSION="1.2.2"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -1324,8 +1324,11 @@ INFO
 #  场景:
 #   a. 一键全新部署的最后一步 (step_fresh_install 自动调用)
 #   b. 日常改密码 (菜单 #18 / CLI set-admin-pw)
-#  流程: 显示账号 admin (已预填) → 提示'请输入 admin 的密码' → 两遍确认
-#        → 写入密码文件 (P4D 未跑) / p4 passwd 实时生效 (P4D 在跑) → 验证登录
+#  流程: 显示账号 admin (已预填) → 获取新密码:
+#        A) P4D_ADMIN_PASSWORD 已有值 → 直接采用 (零手动输入, curl|bash/CI 适用)
+#        B) P4D_ASSUME_YES=1 或无 TTY → 自动生成 + 醒目展示 + 落盘
+#        C) 交互 TTY → 提示'请输入 admin 的密码' + 两遍确认
+#      → 写入密码文件 (P4D 未跑) / p4 passwd 实时生效 (P4D 在跑) → 验证登录
 #  原则: admin 是日常主账号; 其他人员需要访问时, 用 admin 再建独立 superuser 账号
 # ============================================================
 step_set_admin_password() {
@@ -1334,20 +1337,39 @@ step_set_admin_password() {
     echo
     printf "  ${C_BOLD}账号: ${C_CYAN}admin${C_RESET}   (P4D 内置超级用户, 日常登录主账号)\n"
     printf "  其他同事也要用 P4D? 之后可用 admin 再建独立 superuser 账号分给各自使用\n"
-    echo
-    printf "  ${C_YELLOW}请输入 admin 的密码 (输入不回显):${C_RESET}\n"
+    # ── 自动模式 A: 外部已提供 P4D_ADMIN_PASSWORD → 直接采用, 零手动输入 ──
+    if [[ -n "${P4D_ADMIN_PASSWORD:-}" ]]; then
+        pw1="$P4D_ADMIN_PASSWORD"
+        echo
+        ok "使用外部提供的 P4D_ADMIN_PASSWORD (跳过手动输入)"
+        export P4D_ADMIN_PASSWORD="$pw1"
+    # ── 自动模式 B: 无人值守 (P4D_ASSUME_YES=1) 或无 TTY → 自动生成并醒目展示 ──
+    elif [[ "${P4D_ASSUME_YES:-0}" == "1" ]] || ! { : < /dev/tty; } 2>/dev/null; then
+        pw1="$( { openssl rand -base64 48 2>/dev/null || head -c 48 /dev/urandom | base64; } | tr -dc 'A-Za-z0-9' | head -c 20 )Aa9"
+        [[ -n "$pw1" ]] || pw1="${RANDOM}${RANDOM}Ab1${RANDOM}Aa9"
+        echo
+        warn "无人值守 / 无 TTY — 已自动生成 admin 密码 (请妥善保存):"
+        printf '
+      账号: %s    密码: %s
 
-    local ok_pw=0
-    for i in 1 2 3; do
-        read -r -s -p "  ${C_BOLD}密码 (建议 ≥16 位, 大小写+数字+符号)${C_RESET} > " pw1 || pw1=""
+' "${C_BOLD}admin${C_RESET}" "${C_BOLD}${pw1}${C_RESET}"
         echo
-        if [[ -z "$pw1" ]]; then warn "密码不能为空"; sleep 1; continue; fi
-        read -r -s -p "  ${C_BOLD}再输一次确认${C_RESET} > " pw2 || pw2=""
-        echo
-        if [[ "$pw1" == "$pw2" ]]; then ok_pw=1; break; else warn "两次输入不一致, 请重试"; fi
-    done
-    [[ $ok_pw -eq 1 ]] || { warn "已跳过 admin 密码设置 (稍后用菜单 [18] 或 CLI set-admin-pw)"; return 0; }
-    export P4D_ADMIN_PASSWORD="$pw1"
+        export P4D_ADMIN_PASSWORD="$pw1"
+    else
+    # ── 交互模式 (仅当有 TTY 且非无人值守时) ──
+        printf "  ${C_YELLOW}请输入 admin 的密码 (输入不回显):${C_RESET}\n"
+        local ok_pw=0
+        for i in 1 2 3; do
+            read -r -s -p "  ${C_BOLD}密码 (建议 ≥16 位, 大小写+数字+符号)${C_RESET} > " pw1 || pw1=""
+            echo
+            if [[ -z "$pw1" ]]; then warn "密码不能为空"; sleep 1; continue; fi
+            read -r -s -p "  ${C_BOLD}再输一次确认${C_RESET} > " pw2 || pw2=""
+            echo
+            if [[ "$pw1" == "$pw2" ]]; then ok_pw=1; break; else warn "两次输入不一致, 请重试"; fi
+        done
+        [[ $ok_pw -eq 1 ]] || { warn "已跳过 admin 密码设置 (密码文件已有内容时将沿用; 否则用菜单 [18] 设置)"; return 0; }
+        export P4D_ADMIN_PASSWORD="$pw1"
+    fi
 
     # ── 无论 P4D 是否运行, 先落密码文件 (systemd ExecStop 自愈要用它 login) ──
     if ! su -s /bin/sh "$P4D_USER" -c "test -f $P4D_ADMIN_PASSWD_FILE" 2>/dev/null; then
