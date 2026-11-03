@@ -361,6 +361,12 @@ keygen_ok() {
 generate_license_via_keygen() {
     local out="$1"
     local keygen="${KEYGEN_EXE:-}"
+    # KEYGEN_EXE 可能从 p4d-toolkit 继承到 Windows 默认路径 (D:\...) 或其它不存在的位置
+    # → 文件不存在就让它失效, 退回本地搜索 / 自动下载
+    if [[ -n "$keygen" && ! -e "$keygen" ]]; then
+        warn "KEYGEN_EXE=${keygen} 不存在, 忽略此环境变量, 改走本地搜索/自动下载"
+        keygen=""
+    fi
 
     # 1. 找 Keygen: 环境变量 → 常见路径 → 自动从 GitHub 下载 (生成后自动删除)
     local dl_keygen=""
