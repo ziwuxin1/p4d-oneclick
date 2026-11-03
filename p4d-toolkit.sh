@@ -1331,123 +1331,163 @@ INFO
 #      → 写入密码文件 (P4D 未跑) / p4 passwd 实时生效 (P4D 在跑) → 验证登录
 #  原则: admin 是日常主账号; 其他人员需要访问时, 用 admin 再建独立 superuser 账号
 # ============================================================
+# ── 同步 P4 admin 密码到顶层凭据文件 (有则覆盖对应行, 无则追加) ──
+_sync_admin_pw_to_credentials_file() {
+  local pw="$1" f
+  for f in /root/p4d-oneclick-credentials.txt /root/perforce-credentials.txt; do
+    [[ -f "$f" ]] || continue
+    if command -v python3 &>/dev/null && python3 - "$f" "$pw" <<'PY' 2>/dev/null
+import sys, re
+path, pw = sys.argv[1], sys.argv[2]
+t = open(path, encoding='utf-8', errors='replace').read()
+new = re.sub(r'(?m)^((?:P4 )?admin[^=]*密码=).*$', lambda m: m.group(1)+pw, t, count=1)
+if new == t:
+    new = t.rstrip('\n') + f'\nP4 admin 密码={pw}'
+open(path, 'w').write(new)
+PY
+    then
+      chmod 600 "$f" 2>/dev/null
+      return 0
+    fi
+  done
+  return 0
+}
+
+# ── 无旧密码兜底: 停 P4D → 清本地 auth/passwd → 启动 → 直接设新密码 (无需旧密码) ──
+_auto_reset_admin_pw() {
+  local new="$1" port="${P4D_PORT:-1888}" i
+  [[ $EUID -eq 0 ]] || return 1
+  # 1) 停
+  if systemctl is-active -q "$SVC_NAME" 2>/dev/null; then
+    systemctl stop "$SVC_NAME" 2>/dev/null || pkill -x p4d 2>/dev/null
+  else
+    pkill -x p4d 2>/dev/null
+  fi
+  sleep 2
+  # 2) 清本地密码
+  local pwf="${P4ROOT}/auth/passwd"
+  [[ -e "$pwf" ]] && rm -f "$pwf" "${pwf}.old" 2>/dev/null
+  # 3) 启动
+  systemctl start "$SVC_NAME" 2>/dev/null || pkill -USR1 -x p4d 2>/dev/null || true
+  for i in $(seq 1 20); do
+    p4 -p "localhost:${port}" info &>/dev/null && break
+    sleep 1
+  done
+  p4 -p "localhost:${port}" info &>/dev/null || return 1
+  # 4) 无密码直接设
+  _p4_login admin "" || return 1
+  _p4_admin admin "" "$new" "$new" || return 1
+  return 0
+}
+
+# ── p4 客户端: 用密码登录 (管道喂密, 成功返回0) ──
+_p4_login() {
+  local user="$1" pw="$2" port="${P4D_PORT:-1888}"
+  [[ -n "$pw" ]] || pw=""
+  printf '%s\n' "$pw" | p4 -p "localhost:${port}" -u "$user" login 2>&1 | grep -q "logged in"
+}
+
+# ── p4 admin: 旧密码 → 新密码 (三行管道) ──
+_p4_admin() {
+  local user="$1" old="$2" new="$3" new2="$4" port="${P4D_PORT:-1888}" out
+  out="$(printf '%s\n%s\n%s\n' "$old" "$new" "$new2" | p4 -p "localhost:${port}" -u "$user" passwd 2>&1)" || return 1
+  printf '%s' "$out" | grep -qi "Password updated" && ! printf '%s' "$out" | grep -qi "invalid\|error"
+}
+
+# ── 完整改密: 用旧登录 → 改密 → 用新登录验证 ──
+_set_admin_pw() {
+  local old="$1" new="$2"
+  _p4_login admin "$old" || return 1
+  _p4_admin admin "$old" "$new" "$new" || return 1
+  _p4_login admin "$new" || return 1
+  return 0
+}
+
 step_set_admin_password() {
-    local pw1="" pw2=""
-
+    # ── 18. 改 admin 密码 ── 你只输入【新密码】一次; 旧密码自动从凭据文件链获取; 全不对则自动重置 (停→清本地passwd→启→设) ──
+    if ! require_root; then return 1; fi
     echo
-    printf "  ${C_BOLD}账号: ${C_CYAN}admin${C_RESET}   (P4D 内置超级用户, 日常登录主账号)\n"
-    printf "  其他同事也要用 P4D? 之后可用 admin 再建独立 superuser 账号分给各自使用\n"
-    # ── 自动模式 A: 外部已提供 P4D_ADMIN_PASSWORD → 直接采用, 零手动输入 ──
-    if [[ -n "${P4D_ADMIN_PASSWORD:-}" ]]; then
-        pw1="$P4D_ADMIN_PASSWORD"
-        echo
-        ok "使用外部提供的 P4D_ADMIN_PASSWORD (跳过手动输入)"
-        export P4D_ADMIN_PASSWORD="$pw1"
-    # ── 自动模式 B: 无 TTY (如 curl 管道无人值守) → 自动生成并醒目展示. 有 TTY 一律让你亲手输入 ──
-    elif ! { : < /dev/tty; } 2>/dev/null; then
-        pw1="$( { openssl rand -base64 48 2>/dev/null || head -c 48 /dev/urandom | base64; } | tr -dc 'A-Za-z0-9' | head -c 20 )Aa9"
-        [[ -n "$pw1" ]] || pw1="${RANDOM}${RANDOM}Ab1${RANDOM}Aa9"
-        echo
-        warn "无人值守 / 无 TTY — 已自动生成 admin 密码 (请妥善保存):"
-        printf '
-      账号: %s    密码: %s
+    echo "${C_BOLD}── 设置 admin 密码 ────────────────────────────${C_RESET}"
+    echo "  账号: admin   (P4D 内置超级用户, 日常登录主账号)"
+    echo "  其他同事也要用 P4D? 完成后可用 admin 建独立超级用户账号发放"
+    echo
 
-' "${C_BOLD}admin${C_RESET}" "${C_BOLD}${pw1}${C_RESET}"
-        echo
-        export P4D_ADMIN_PASSWORD="$pw1"
-    else
-    # ── 交互模式 (仅当有 TTY 且非无人值守时) ──
-        printf "  ${C_YELLOW}请输入 admin 的密码 (输入不回显):${C_RESET}\n"
-        local ok_pw=0
-        for i in 1 2 3; do
-            read -r -s -p "  ${C_BOLD}密码 (建议 ≥16 位, 大小写+数字+符号)${C_RESET} > " pw1 || pw1=""
-            echo
-            if [[ -z "$pw1" ]]; then warn "密码不能为空"; sleep 1; continue; fi
-            read -r -s -p "  ${C_BOLD}再输一次确认${C_RESET} > " pw2 || pw2=""
-            echo
-            if [[ "$pw1" == "$pw2" ]]; then ok_pw=1; break; else warn "两次输入不一致, 请重试"; fi
-        done
-        [[ $ok_pw -eq 1 ]] || { warn "已跳过 admin 密码设置 (密码文件已有内容时将沿用; 否则用菜单 [18] 设置)"; return 0; }
-        export P4D_ADMIN_PASSWORD="$pw1"
+    # ── 自动模式 A: 部署中/无 TTY 且密码已由调用方给定 → 静默直接设 ──
+    if [[ -n "${P4D_ASSUME_YES:-0}" && -s "${P4D_ADMIN_PASSWD_FILE:-}" ]]; then
+        local _n
+        _n="$(tr -d ' \t\r\n' < "$P4D_ADMIN_PASSWD_FILE" 2>/dev/null)" || _n=""
+        if [[ ${#_n} -ge 6 ]] && { _set_admin_pw "$_n" "$_n" 2>/dev/null || _set_admin_pw "" "$_n" 2>/dev/null || _auto_reset_admin_pw "$_n"; }; then
+            printf '%s' "$_n" > "$P4D_ADMIN_PASSWD_FILE"; chmod 600 "$P4D_ADMIN_PASSWD_FILE" 2>/dev/null
+            _sync_admin_pw_to_credentials_file "$_n" 2>/dev/null || true
+            echo "${C_GREEN}  ✅ [自动] admin 密码已设置: ${_n}${C_RESET}"
+            return 0
+        fi
+        die "自动模式: 无法设置 admin 密码 (P4D 未监听?)"
     fi
 
-    # ── 无论 P4D 是否运行, 先落密码文件 (systemd ExecStop 自愈要用它 login; 本次会话的密码总是覆盖, 保持同步) ──
-    mkdir -p "$(dirname "$P4D_ADMIN_PASSWD_FILE")"
-    umask 077
-    printf '%s' "$pw1" > "$P4D_ADMIN_PASSWD_FILE"
-    chmod 600 "$P4D_ADMIN_PASSWD_FILE"
-    chown "$P4D_USER" "$P4D_ADMIN_PASSWD_FILE"
+    # ── 交互: 只问你新密码 (输两次) ──
+    local pw1=""
+    while [[ ${#pw1} -lt 6 ]]; do
+        pw1="$(_ask "输入 admin 新密码 (≥6位, 大小写+数字+符号) " "")"
+        [[ ${#pw1} -ge 6 ]] || echo "  ⚠ 至少 6 位"
+    done
+    local pw2=""
+    while [[ "$pw2" != "$pw1" ]]; do
+        pw2="$(_ask "再输入一次确认 (不回显) " "$pw1")"
+        [[ "$pw2" == "$pw1" ]] || { echo "  ⚠ 两次不一致, 重头来"; pw1=""; pw2=""; }
+    done
 
-    # ── P4D 运行中? 实时改密 (已验证可用: 旧密码登录 → p4 passwd 三行 → 新密码验证) ──
-    local P4PORT_LIVE="${P4PORT:-${P4PORT_DEFAULT}}"
-    if timeout 2 bash -c ">/dev/tcp/127.0.0.1/${P4PORT_LIVE}" 2>/dev/null; then
-        # 旧密码 = 当前密码文件里的值 (改密成功后才覆盖为新值)
-        local _oldpw=""
-        if [[ -s "$P4D_ADMIN_PASSWD_FILE" ]]; then
-            _oldpw="$(tr -d ' \t\r\n' < "$P4D_ADMIN_PASSWD_FILE" 2>/dev/null)"
+    # ── 等 P4D 监听 ──
+    local _i
+    _i=0
+    while ! p4 -p "localhost:${P4D_PORT:-1888}" info &>/dev/null; do
+        _i=$((_i+1)); [[ $_i -ge 15 ]] && break; sleep 1
+    done
+    p4 -p "localhost:${P4D_PORT:-1888}" info &>/dev/null || die "P4D 监听中 (先 systemctl start ${SVC_NAME})"
+
+    # ── 自动旧密码链: 逐个候选文件尝试, 全程零手动旧密码 ──
+    local c f old ok=0
+    for c in "${P4D_ADMIN_PASSWD_FILE}" /root/p4d-oneclick-credentials.txt /root/perforce-credentials.txt; do
+        [[ -n "$c" && -s "$c" ]] || continue
+        f="$(readlink -f "$c" 2>/dev/null)" || f="$c"
+        [[ -s "$f" ]] || continue
+        old="$(tr -d ' \t\r\n' < "$f" 2>/dev/null)" || old=""
+        if [[ -z "$old" && "$f" == *.txt ]]; then
+            old="$(grep -m1 -E "admin.*密码=|PASSWD=" "$f" 2>/dev/null | head -n1)"
+            old="${old##*=}"
+            old="$(printf '%s' "$old" | sed 's/ *←.*//' | sed 's/[[:space:]]*$//')"
         fi
-        # 用旧密码登录发票据 (最多 3 次机会)
-        local _t="" _out="" _try=1
-        while [ "$_try" -le 3 ] && [ -z "$_t" ]; do
-            _out="$(printf '%s\n' "$_oldpw" | p4 -p "localhost:${P4PORT_LIVE}" -u admin login 2>&1)" || true
-            _t="$(printf '%s\n' "$_out" | awk '/Ticket = /{print $NF; exit}')"
-            if [ -z "$_t" ]; then
-                warn "旧密码 '$_oldpw' 登录失败 (第 $_try 次): $(printf '%s' "$_out" | tail -n1)"
-                local _retry
-                if { : < /dev/tty; } 2>/dev/null; then
-                    read -rsp "  ${C_YELLOW}重新输入【当前旧密码】(留空=放弃实时改密):${C_RESET} " _retry </dev/tty || _retry=""
-                    echo
-                    [[ -n "$_retry" ]] && _oldpw="$_retry"
-                fi
-                _try=$((_try+1))
-            fi
-        done
-        if [ -n "$_t" ]; then
-            # 改密: p4 passwd 三行管道 (当前密码 + 新 + 确认)
-            _out="$(printf '%s\n%s\n%s\n' "$_oldpw" "$pw1" "$pw1" | P4TICKETS="$_t" p4 -p "localhost:${P4PORT_LIVE}" -u admin passwd 2>&1)" || true
-            case "$_out" in
-                *"Password updated"*|*"password updated"*) : ;;
-                *) warn "⚠ p4 passwd 未生效: $_out"
-                   warn "   密码文件仍保留【旧密码】(未覆盖); 请人工 p4 passwd 后, 再用菜单 [18] 记录新密码"
-                   return 1 ;;
-            esac
-            # 验证: 新密码能否登录 (验证不过 = 不算成功)
-            local VTX=/tmp/.p4tickets_verify_pw
-            rm -f "$VTX"
-            if printf '%s\n' "$pw1" | P4TICKETS="$VTX" p4 -p "localhost:${P4PORT_LIVE}" -u admin login >/dev/null 2>&1 && [[ -s "$VTX" ]]; then
-                ok "✅ 新密码已实时生效并登录验证通过 — 客户端: P4USER=admin  P4PORT=localhost:${P4PORT_LIVE}"
-            else
-                warn "⚠ 新密码登录验证未通过 — 查菜单 [7] 体检后再试"
-                rm -f "$VTX"
-                return 1
-            fi
-            rm -f "$VTX"
-            # 改密+验证都成功 → 才覆盖密码文件
-            printf '%s' "$pw1" > "$P4D_ADMIN_PASSWD_FILE"
-            chmod 600 "$P4D_ADMIN_PASSWD_FILE"
-            # 清理陈旧超用户票据
-            P4TICKETS="$_t" p4 -p "localhost:${P4PORT_LIVE}" -u admin tickets -d >/dev/null 2>&1 || true
+        [[ -n "$old" ]] || continue
+        if _set_admin_pw "$old" "$pw1"; then
+            echo "  ${C_DIM}旧密码自动取自: $f (无需手动输入)${C_RESET}"
+            ok=1
+            break
+        fi
+    done
+
+    # ── 旧密码全部失败 → 自动重置 (彻底不问你旧密码) ──
+    if [[ $ok -ne 1 ]]; then
+        warn "旧密码候选全部无效 → 自动重置: 停 P4D → 清除本地 auth/passwd → 启动 → 直接设新密码"
+        echo "  ${C_DIM}⚠ 重置期间客户端会短暂断开 (约 5-10 秒)${C_RESET}"
+        if _auto_reset_admin_pw "$pw1"; then
+            echo "  ${C_DIM}旧密码自动重置成功 (停P4D→清passwd→启→直设)${C_RESET}"
+            ok=1
         else
-            warn "⚠ 无法用记录的旧密码登录 → 未实时改密 (密码文件仍保留旧密码)"
-            warn "   请人工执行: p4 passwd 用旧密码改新 → 成功后再来菜单 [18] 记录新密码"
-            warn "   (若彻底忘了旧密码: p4 admin 排查; 改前先 checkpoint 备份!)"
-            return 1
+            die "自动重置失败 (排查: /journalctl -u ${SVC_NAME} -n 30)"
         fi
-    else
-        info "P4D 当前未运行 — 新密码已写入 $P4D_ADMIN_PASSWD_FILE (启动后立即生效)"
     fi
 
-    # ── 同步凭据文件 (无论走哪条路径都要刷) ──
-    if [[ -f /root/p4d-oneclick-credentials.txt && -w /root/p4d-oneclick-credentials.txt ]]; then
-        local esc
-        esc="${pw1//\\/\\\\}"; esc="${esc//&/\\&}"; esc="${esc//\//\\/}"
-        sed -i "s|^P4 admin 密码=.*|P4 admin 密码=${esc}|" /root/p4d-oneclick-credentials.txt 2>/dev/null
-    fi
-
+    # ── 固化为下次可用的"旧密码" ──
+    printf '%s' "$pw1" > "$P4D_ADMIN_PASSWD_FILE"; chmod 600 "$P4D_ADMIN_PASSWD_FILE" 2>/dev/null
+    _sync_admin_pw_to_credentials_file "$pw1" 2>/dev/null || true
 
     echo
-    info "记住: 账号 admin / 密码你刚设置的。其他人员需要时, 用 admin 建独立账号 (p4 users -o <名字> -a superuser)"
+    echo "${C_GREEN}${C_BOLD}  ✅ admin 密码已更改: ${pw1}${C_RESET}"
+    echo "  ${C_DIM}已固化到: ${P4D_ADMIN_PASSWD_FILE} (600) + /root/*credentials*.txt — 下次改密继续零手动${C_RESET}"
+    echo "  ${C_DIM}登录: p4 -p ${P4_PUBLIC_HOST:-localhost}:${P4D_PORT:-1888} login${C_RESET}  (admin / ${pw1})"
+    echo "  ${C_DIM}同事用: 用 admin 建独立账号  p4 users -o 名字 -a superuser${C_RESET}"
     echo
+    return 0
 }
 
 step_fresh_install() {
