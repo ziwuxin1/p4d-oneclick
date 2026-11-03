@@ -989,6 +989,7 @@ main() {
 
     # 部署完直接弹出数字菜单 (交互式终端才弹; curl|bash 管道无 tty 时自动跳过, 不卡死)
     if [[ -t 0 ]]; then
+        trap - ERR            # 解除安装期错误陷阱: 菜单内的启动/停止/体检失败不应触发安装失败处理
         echo
         main_menu
     fi
