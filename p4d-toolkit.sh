@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.8"
+readonly TOOLKIT_VERSION="1.2.9"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -1612,6 +1612,30 @@ _report_set_pw_rc() {
   return 1
 }
 
+step_show_admin_password() {
+    # ── 19. 查看 admin 密码: 读保存的密码文件, 并实际登录一次验证它是不是当前真实密码 ──
+    ensure_root
+    echo
+    echo "${C_BOLD}── 查看 admin 密码 ────────────────────────────${C_RESET}"
+    if [[ ! -s "${P4D_ADMIN_PASSWD_FILE:-}" ]]; then
+        warn "没有保存的密码文件 (${P4D_ADMIN_PASSWD_FILE:-未配置}) — 用菜单 18 设置一次即可生成"
+        return 0    # 菜单在 errexit 下运行, 非 0 会直接退出整个 toolkit
+    fi
+    local pw
+    pw="$(_read_saved_admin_pw "$P4D_ADMIN_PASSWD_FILE")"
+    echo "  账号: admin"
+    echo "  密码: ${C_BOLD}${pw}${C_RESET}"
+    echo "  ${C_DIM}来源: ${P4D_ADMIN_PASSWD_FILE}${C_RESET}"
+    echo "  ${C_DIM}登录: p4 -p ${P4_PUBLIC_HOST:-localhost}:${P4D_PORT:-1888} -u admin login${C_RESET}"
+    if ! _p4_is_up; then
+        warn "P4D 未监听, 无法验证这个密码是否有效"
+    elif _p4_login admin "$pw"; then
+        echo "  ${C_GREEN}✓ 已验证: 这就是 admin 当前的真实密码${C_RESET}"
+    else
+        warn "登录验证失败: 保存的密码和实际密码不一致 — 用菜单 18 重新设置"
+    fi
+}
+
 step_set_admin_password() {
     # ── 18. 改 admin 密码 ── 你只输入【新密码】一次; 旧密码自动从凭据文件链获取; 全不对则自动重置 (停→清本地passwd→启→设) ──
     ensure_root
@@ -1813,6 +1837,7 @@ main_menu() {
   16) 立刻 rsync 到 NAS (checkpoint + depot 一次推完)
   17) 一键生成 license (keygen.exe via wine) + 自动导入
   18) 设置/修改 admin 密码 (账号: admin, 日常主账号)
+  19) 查看当前 admin 密码 (并验证能否登录)
 
   ${C_BOLD}── 卸载 ──${C_RESET}
   99) 卸载 P4D + Toolkit
@@ -1842,6 +1867,7 @@ MENU
             16) step_run_rsync_now ;;
             17) step_gen_license ;;
             18) step_set_admin_password ;;
+            19) step_show_admin_password ;;
             99) step_uninstall ;;
             q|exit) ok "再见"; exit 0 ;;
             *) err "未知选项: $choice" ;;
@@ -1871,7 +1897,8 @@ main() {
             gen-license)     step_gen_license ;;
             fresh-install)   step_fresh_install ;;
             set-admin-pw)    step_set_admin_password ;;
-            *) die "未知子命令: $1 (用法: status|checkpoint|rsync|counter-rescue|restore|gen-license|fresh-install|set-admin-pw)" ;;
+            show-admin-pw)   step_show_admin_password ;;
+            *) die "未知子命令: $1 (用法: status|checkpoint|rsync|counter-rescue|restore|gen-license|fresh-install|set-admin-pw|show-admin-pw)" ;;
         esac
         exit 0
     fi
