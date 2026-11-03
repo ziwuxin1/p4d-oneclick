@@ -1472,7 +1472,7 @@ main_menu() {
         local sip
         sip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | grep -v '^127\.' | head -1 || true)"
         if [[ -n "$sip" ]]; then
-            echo "${C_DIM}  服务器: ${C_BOLD}${C_GREEN}${sip}:${P4PORT}${C_RESET}${C_DIM}   本机: ${C_GRAY}127.0.0.1:${P4PORT}  (P4USER=admin)${C_RESET}"
+            echo "${C_DIM}  服务器: ${C_BOLD}${C_GREEN}${sip}:${P4PORT}${C_RESET}${C_DIM}   本机: ${C_DIM}127.0.0.1:${P4PORT}  (P4USER=admin)${C_RESET}"
         fi
         echo
         cat <<MENU
