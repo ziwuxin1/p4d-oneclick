@@ -1371,29 +1371,46 @@ step_set_admin_password() {
         export P4D_ADMIN_PASSWORD="$pw1"
     fi
 
-    # ── 无论 P4D 是否运行, 先落密码文件 (systemd ExecStop 自愈要用它 login) ──
-    if ! su -s /bin/sh "$P4D_USER" -c "test -f $P4D_ADMIN_PASSWD_FILE" 2>/dev/null; then
-        mkdir -p "$(dirname "$P4D_ADMIN_PASSWD_FILE")"
-        umask 077
-        printf '%s' "$pw1" > "$P4D_ADMIN_PASSWD_FILE"
-        chmod 600 "$P4D_ADMIN_PASSWD_FILE"
-        chown "$P4D_USER" "$P4D_ADMIN_PASSWD_FILE"
-    fi
+    # ── 无论 P4D 是否运行, 先落密码文件 (systemd ExecStop 自愈要用它 login; 本次会话的密码总是覆盖, 保持同步) ──
+    mkdir -p "$(dirname "$P4D_ADMIN_PASSWD_FILE")"
+    umask 077
+    printf '%s' "$pw1" > "$P4D_ADMIN_PASSWD_FILE"
+    chmod 600 "$P4D_ADMIN_PASSWD_FILE"
+    chown "$P4D_USER" "$P4D_ADMIN_PASSWD_FILE"
 
     # ── P4D 运行中? 实时生效 + 验证 ──
     local P4PORT_LIVE="${P4PORT:-${P4PORT_DEFAULT}}"
     if timeout 2 bash -c ">/dev/tcp/127.0.0.1/${P4PORT_LIVE}" 2>/dev/null; then
-        if su -s /bin/sh "$P4D_USER" -c "printf '%s' '$pw1' | p4 -p localhost:${P4PORT_LIVE} passwd" 2>/dev/null; then
-            ok "admin 密码已实时生效"
+        # 1) root 后门 p4 admin 颁超用户票据 (不需要旧密码) → 用它改密码 (两条=新密码+确认, 已设过密码也能改)
+        local sup=""
+        sup="$(p4 -p "localhost:${P4PORT_LIVE}" admin 2>/dev/null | awk '{print $NF}' | tr -d '\r')"
+        if [[ -n "$sup" ]] && printf '%s\n%s\n' "$pw1" "$pw1" | P4TICKETS="$sup" p4 -p "localhost:${P4PORT_LIVE}" -u admin passwd >/dev/null 2>&1; then
+            ok "admin 密码已实时写入 (root 超用户票据路径, 已设过密码也能改)"
         else
-            warn "p4 passwd 未生效 (admin 可能是出厂空密码, 首次设置行为不同), 请手动:"
-            warn "   printf '<密码>' | p4 -p localhost:${P4PORT_LIVE} passwd"
+            # 2) 回退: 出厂空密码时的老路径
+            if printf '%s\n%s\n' "$pw1" "$pw1" | su -s /bin/sh "$P4D_USER" -c "p4 -p localhost:${P4PORT_LIVE} -u admin passwd" >/dev/null 2>&1; then
+                ok "admin 密码已实时写入"
+            else
+                warn "⚠ p4 passwd 未生效 — 请手动: p4 admin 拿超用户票据, 再 p4 passwd"
+                return 1
+            fi
         fi
-        rm -f /tmp/.p4tickets_admin
-        if printf '%s' "$pw1" | su -s /bin/sh "$P4D_USER" -c "P4TICKETS=/tmp/.p4tickets_admin p4 -p localhost:${P4PORT_LIVE} -u admin login" 2>/dev/null && [[ -f /tmp/.p4tickets_admin ]]; then
-            ok "✅ admin 登录验证通过 (新密码可用)"
+        # 3) 验证: 只有新密码正确才会发票据 (验证不过 = 未设置成功, 绝不谎报成功)
+        local VTX=/tmp/.p4tickets_verify_pw
+        rm -f "$VTX"
+        if printf '%s\n' "$pw1" | su -s /bin/sh "$P4D_USER" -c "P4TICKETS=$VTX p4 -p localhost:${P4PORT_LIVE} -u admin login" >/dev/null 2>&1 && [[ -s "$VTX" ]]; then
+            ok "✅ 新密码登录验证通过 — 本机/局域网客户端即可用: P4USER=admin  P4PORT=localhost:${P4PORT_LIVE}"
         else
-            warn "⚠ 新密码 login 验证未通过 — 请用手动命令设置, 或菜单 [7] 体检后再试"
+            warn "⚠ 新密码登录验证未通过 — 密码可能未生效, 查菜单 [7] 体检后再试"
+            rm -f "$VTX"
+            return 1
+        fi
+        rm -f "$VTX"
+        # 4) 同步凭据文件 (install-ubuntu.sh 生成的, 如有)
+        if [[ -f /root/p4d-oneclick-credentials.txt && -w /root/p4d-oneclick-credentials.txt ]]; then
+            local esc
+            esc="${pw1//\\/\\\\}"; esc="${esc//&/\\&}"; esc="${esc//\//\\/}"
+            sed -i "s|^P4 admin 密码=.*|P4 admin 密码=${esc}|" /root/p4d-oneclick-credentials.txt 2>/dev/null
         fi
     else
         info "P4D 当前未运行 — 密码已写入 $P4D_ADMIN_PASSWD_FILE, 下次启动后可用菜单 [7] 体检"
