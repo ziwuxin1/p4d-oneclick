@@ -1405,7 +1405,7 @@ _set_admin_pw() {
 
 step_set_admin_password() {
     # ── 18. 改 admin 密码 ── 你只输入【新密码】一次; 旧密码自动从凭据文件链获取; 全不对则自动重置 (停→清本地passwd→启→设) ──
-    if ! require_root; then return 1; fi
+    ensure_root
     echo
     echo "${C_BOLD}── 设置 admin 密码 ────────────────────────────${C_RESET}"
     echo "  账号: admin   (P4D 内置超级用户, 日常登录主账号)"
