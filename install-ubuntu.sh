@@ -347,6 +347,17 @@ prompt_license_paste() {
 #   KEYGEN_CUSTOMER   默认 admin
 #   KEYGEN_USERS      默认 1000
 #   KEYGEN_LIC_EXPIRES / KEYGEN_SUP_EXPIRES  默认 2050
+# Keygen 文件有效性: 存在 + 可读 + ≥ 300KB + 头两个字节 MZ (Windows PE)
+# 排除: 0 字节坏 scp 残留 / GitHub LFS 占位 (3.4MB 的 keygen 假文件) / 截断下载
+keygen_ok() {
+    [[ -f "$1" && -r "$1" ]] || return 1
+    local sz magic
+    sz=$(stat -c%s -- "$1" 2>/dev/null) || return 1
+    (( sz >= 300000 )) || return 1
+    magic=$(head -c 2 -- "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    [[ "$magic" == "4d5a" ]] || return 1
+}
+
 generate_license_via_keygen() {
     local out="$1"
     local keygen="${KEYGEN_EXE:-}"
@@ -357,7 +368,11 @@ generate_license_via_keygen() {
         local c
         for c in /root/Keygen.bin "/root/p4d/Keygen.bin" /root/Keygen.exe \
                  "/root/p4d/Keygen.exe" "$HOME/Keygen.exe" ./Keygen.exe; do
-            if [[ -f "$c" ]]; then keygen="$c"; break; fi
+            [[ -e "$c" || -L "$c" ]] || continue
+            if keygen_ok "$c"; then keygen="$c"; info "找到本地 Keygen: $c (有效)"; break; fi
+            # 损坏/占位文件 (常见: 之前 scp 失败留下的 0 字节文件) → 删除, 走下载
+            warn "发现损坏的 Keygen 残留: $c (大小 $(stat -c%s "$c" 2>/dev/null || echo ?) 字节), 删除后自动重新下载"
+            rm -f -- "$c" 2>/dev/null
         done
     fi
     # 自动下载 (公开仓库, 匿名可用) — VPS 零手动步骤
@@ -373,6 +388,7 @@ generate_license_via_keygen() {
             warn "Keygen 自动下载失败 (网络/仓库被拦), 详细错误:"
             sed 's/^/    /' /tmp/.keygen_dl.err 2>/dev/null | tail -n 5
             rm -f /tmp/.keygen_dl.err
+            warn "常见: 云服务器防火墙拦 GitHub / 无外网。可先 scp 一个有效 Keygen.exe 到 /root/ 再重跑"
         fi
     fi
     if [[ -z "$keygen" ]] && can_prompt; then
@@ -386,20 +402,43 @@ generate_license_via_keygen() {
     fi
 
     # 2. wine (没有就尝试装, 装不上也转手动粘贴)
-    local wine
+    local wine wine_installed_now=0
     wine="$(command -v wine64 || command -v wine || true)"
     if [[ -z "$wine" ]]; then
         info "未检测到 Wine, 正在安装 (约 2-3 分钟)..."
-        ( apt-get update -qq && apt-get install -y -qq wine64 </dev/null ) 2>&1 | tail -n 5 \
+        if ( apt-get update -qq && apt-get install -y -qq wine64 </dev/null ) 2>&1 | tail -n 5 \
             || apt-get install -y -qq wine64 </dev/null \
-            || apt-get install -y -qq wine </dev/null \
-            || { warn "Wine 全部安装路径都失败, 见上方输出"; }
+            || apt-get install -y -qq wine </dev/null; then
+            wine_installed_now=1
+        else
+            warn "Wine 全部安装路径都失败, 见上方输出"
+        fi
         wine="$(command -v wine64 || command -v wine || true)"
     fi
     if [[ -z "$wine" ]]; then
         warn "Wine 安装失败 — 转入手动粘贴选项"
         return 1
     fi
+
+    # 4. 用完即删的 Wine 环境 (独立 prefix, 结束时整包清干净)
+    KEYGEN_WINE_PREFIX=/root/.wine-p4d-keygen
+    cleanup_wine_keygen() {
+        rm -rf "$KEYGEN_WINE_PREFIX" 2>/dev/null
+        if (( wine_installed_now )); then
+            local wk
+            for wk in wine64 wine; do
+                dpkg -s "$wk" >/dev/null 2>&1 || continue
+                if [[ $(dpkg-query -W -f='${Auto-Remove}' "$wk" 2>/dev/null) == yes ]]; then
+                    log "卸载 $wk + 自动清理依赖..."
+                    ( apt-get -y autoremove --purge "$wk" </dev/null ) 2>&1 | tail -n 3
+                    break  # 只删我们装的那个
+                fi
+            done
+        fi
+        rm -f /root/Keygen.bin 2>/dev/null
+    }
+    export WINEPREFIX="$KEYGEN_WINE_PREFIX"
+    mkdir -p "$KEYGEN_WINE_PREFIX"
 
     # 3. 参数 (按 Keygen Method.txt: -customer admin -ip <服务器IP> -license-expires 2050 -support-expires 2050 -users 1000)
     local ip="${KEYGEN_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
@@ -412,7 +451,7 @@ generate_license_via_keygen() {
     # 4. 在干净目录里跑, 便于认出输出文件
     local work lic=""
     work="$(mktemp -d)"
-    ( cd "$work" && WINEDEBUG=-all "$wine" "$keygen" </dev/null \
+    ( cd "$work" && WINEDEBUG=-all WINEPREFIX="$KEYGEN_WINE_PREFIX" "$wine" "$keygen" </dev/null \
         -customer "$customer" -ip "$ip" \
         -license-expires "$lic_exp" -support-expires "$sup_exp" \
         -users "$users" ) >/dev/null 2>&1
@@ -432,11 +471,14 @@ generate_license_via_keygen() {
     cp "$lic" "$out"
     install -m 600 "$lic" /root/license
     rm -rf "$work"
-    if [[ -n "$dl_keygen" && -f /root/Keygen.bin ]]; then
+    if [[ -f /root/Keygen.bin ]]; then
         rm -f /root/Keygen.bin
-        info "已删除临时 Keygen 文件 (/root/Keygen.bin)"
+        info "已删除 Keygen 文件 (/root/Keygen.bin)"
     fi
     looks_like_license "$out" || { warn "生成的文件缺 license 特征字段, 请人工检查: /root/license"; }
+    info "生成成功, 清理 Wine 环境..."
+    cleanup_wine_keygen
+    ok "已清理: Keygen + Wine($([[ $wine_installed_now == 1 ]] && echo 本次安装并卸载 || echo 系统原有保留)) + WINEPREFIX"
     return 0
 }
 
