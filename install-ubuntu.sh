@@ -972,7 +972,8 @@ print_summary() {
     printf "${C_BOLD}${C_GREEN}══════════════════════════════════════════════════════${C_RESET}\n\n"
     printf "  P4PORT     %s:%s\n" "$ip" "$P4PORT"
     printf "  P4USER     admin\n"
-    printf "  凭据       %s  (sudo cat 查看)\n" "$CREDENTIALS_FILE"
+    printf "  admin 密码 ${C_BOLD}%s${C_RESET}\n" "${ADMIN_PASSWORD:-(见 ${P4D_ADMIN_PASSWD_FILE})}"
+    printf "  凭据      %s  (sudo cat 查看)\n" "$CREDENTIALS_FILE"
     printf "  菜单       sudo p4d-toolkit\n"
     printf "  日志       %s\n" "$ONECLICK_LOG"
     printf "  备份       每天 03:00 checkpoint → %s,03:30 镜像 → %s\n" "$BACKUP_DIR" "$NAS_BACKUP_ROOT"
@@ -1033,6 +1034,8 @@ main() {
     # 无键盘的 headless 环境切不动, 自动跳过不卡死
     if exec 0</dev/tty 2>/dev/null; then
         trap - ERR            # 解除安装期错误陷阱: 菜单内的启动/停止/体检失败不应触发安装失败处理
+        # 菜单会清屏, 先停一下让你记下上面的 admin 密码
+        read -rsn1 -p "  记好上面的 admin 密码后, 按任意键进入菜单..." _ || true
         echo
         main_menu
     fi
