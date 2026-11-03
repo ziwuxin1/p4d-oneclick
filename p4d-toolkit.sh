@@ -1343,8 +1343,8 @@ step_set_admin_password() {
         echo
         ok "使用外部提供的 P4D_ADMIN_PASSWORD (跳过手动输入)"
         export P4D_ADMIN_PASSWORD="$pw1"
-    # ── 自动模式 B: 无人值守 (P4D_ASSUME_YES=1) 或无 TTY → 自动生成并醒目展示 ──
-    elif [[ "${P4D_ASSUME_YES:-0}" == "1" ]] || ! { : < /dev/tty; } 2>/dev/null; then
+    # ── 自动模式 B: 无 TTY (如 curl 管道无人值守) → 自动生成并醒目展示. 有 TTY 一律让你亲手输入 ──
+    elif ! { : < /dev/tty; } 2>/dev/null; then
         pw1="$( { openssl rand -base64 48 2>/dev/null || head -c 48 /dev/urandom | base64; } | tr -dc 'A-Za-z0-9' | head -c 20 )Aa9"
         [[ -n "$pw1" ]] || pw1="${RANDOM}${RANDOM}Ab1${RANDOM}Aa9"
         echo
