@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.6"
+readonly TOOLKIT_VERSION="1.2.7"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -1424,14 +1424,107 @@ _p4_is_up() {
   timeout 5 p4 -p "localhost:${P4D_PORT:-1888}" info &>/dev/null
 }
 
-# ── 无旧密码兜底: 停 P4D → 启动 → 尝试无旧密码直设 (仅当 admin 当前确实没有密码时能成功) ──
+# ── 把 db.user 的 journal 导出里 admin 的 Password 字段清空, 输出补丁 journal ──
+#    journal 格式: 字段以空格分隔, 字符串用 @..@ 包裹 (内部 @ 写成 @@), 数字不包裹
+#    db.user 字段: User Email JobView Update Access FullName Password Strength Ticket ...
+_P4_CLEAR_PW_PY='
+import re, sys
+src, dst, user = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src, encoding="utf-8", errors="surrogateescape").read()
+records, toks, i, n = [], [], 0, len(text)
+while i < n:
+    c = text[i]
+    if c == "\n":
+        if toks: records.append(toks)
+        toks = []; i += 1
+    elif c == " ":
+        i += 1
+    elif c == "@":
+        j = i + 1
+        while True:
+            k = text.index("@", j)
+            if k + 1 < n and text[k + 1] == "@":
+                j = k + 2; continue
+            break
+        toks.append(text[i:k + 1]); i = k + 1
+    else:
+        j = i
+        while j < n and text[j] not in " \n": j += 1
+        toks.append(text[i:j]); i = j
+if toks: records.append(toks)
+PW = 3 + 6   # 0=操作 1=版本 2=表名 3=User ... 3+6=Password
+out = []
+for r in records:
+    if len(r) > PW and r[0] == "@pv@" and r[2] == "@db.user@" and r[3] == "@" + user + "@":
+        pw = r[PW][1:-1] if r[PW].startswith("@") else ""
+        if not pw:
+            sys.exit("ALREADY_EMPTY")
+        if not re.fullmatch(r"[0-9A-Fa-f]{32}|\$.{16,}|[^\s@]{16,}", pw):
+            sys.exit("UNEXPECTED_FIELD len=%d fields=%d" % (len(pw), len(r)))
+        r = r[:PW] + ["@@"] + r[PW + 1:]
+        out.append(" ".join(r))
+if not out:
+    sys.exit("USER_NOT_FOUND")
+open(dst, "w", encoding="utf-8", errors="surrogateescape").write("\n".join(out) + "\n")
+'
+
+# ── 离线清空 admin 密码 (P4D 必须已停): 备份 db.user → 导出 → 改 → 回放; 失败自动还原 ──
+_offline_clear_admin_pw() {
+  local ts dump patch bak rc=0 msg
+  command -v python3 &>/dev/null || { echo "  [清密] 需要 python3: apt install -y python3" >&2; return 1; }
+  [[ -x "$P4D_BIN" && -f "${P4ROOT}/db.user" ]] || { echo "  [清密] 找不到 ${P4D_BIN} 或 ${P4ROOT}/db.user" >&2; return 1; }
+  ts="$(date +%Y%m%d%H%M%S)"
+  bak="${P4ROOT}/db.user.bak-${ts}"
+  dump="${P4ROOT}/.admin-reset-${ts}.jnl"
+  patch="${P4ROOT}/.admin-reset-${ts}.patch.jnl"
+  cp -p "${P4ROOT}/db.user" "$bak" || return 1
+  echo "  [清密] 已备份 db.user → ${bak}" >&2
+  if ! sudo -u "$P4D_USER" "$P4D_BIN" -r "$P4ROOT" -jd "$dump" db.user >/dev/null 2>&1; then
+    echo "  [清密] 导出 db.user 失败" >&2
+    rm -f "$dump"; return 1
+  fi
+  msg="$(python3 -c "$_P4_CLEAR_PW_PY" "$dump" "$patch" admin 2>&1)" || rc=$?
+  rm -f "$dump"
+  if [[ $rc -ne 0 ]]; then
+    rm -f "$patch"
+    if [[ "$msg" == *ALREADY_EMPTY* ]]; then
+      echo "  [清密] admin 本来就没有密码, 无需清除" >&2; return 0
+    fi
+    echo "  [清密] 未修改 (安全起见中止): ${msg##*$'\n'}" >&2
+    return 1
+  fi
+  chown "$P4D_USER:$P4D_USER" "$patch"
+  if ! sudo -u "$P4D_USER" "$P4D_BIN" -r "$P4ROOT" -jr "$patch" >/dev/null 2>&1; then
+    echo "  [清密] 回放失败 → 还原 db.user" >&2
+    cp -p "$bak" "${P4ROOT}/db.user"
+    rm -f "$patch"; return 1
+  fi
+  rm -f "$patch"
+  echo "  [清密] admin 密码已清空 (备份保留在 ${bak})" >&2
+  return 0
+}
+
+# ── 无旧密码兜底: 停 P4D → [可选: 离线清空 admin 密码] → 启动 → 无旧密码直设 ──
+#    第二个参数传 clear 才会动 db.user; 不传则只在 admin 本来就没密码时能成功
 _auto_reset_admin_pw() {
-  local new="$1" i
+  local new="$1" mode="${2:-}" i
   [[ $EUID -eq 0 ]] || return 1
   echo "  [重置 1/3] 停止 P4D 服务" >&2
   _run_with_countdown 30 "systemctl stop ${SVC_NAME}" systemctl stop "$SVC_NAME" || true
   pkill -x p4d 2>/dev/null || true
   for i in 1 2 3 4 5; do pgrep -x p4d >/dev/null 2>&1 && pkill -9 -x p4d 2>/dev/null && sleep 1; done
+
+  if [[ "$mode" == "clear" ]]; then
+    if pgrep -x p4d >/dev/null 2>&1; then
+      echo "  [重置] p4d 还在运行, 不能离线改 db.user — 中止" >&2
+      _run_with_countdown 60 "systemctl start ${SVC_NAME}" systemctl start "$SVC_NAME" || true
+      return 1
+    fi
+    if ! _offline_clear_admin_pw; then
+      _run_with_countdown 60 "systemctl start ${SVC_NAME}" systemctl start "$SVC_NAME" || true
+      return 1
+    fi
+  fi
 
   echo "  [重置 2/3] 启动 P4D 服务" >&2
   _run_with_countdown 60 "systemctl start ${SVC_NAME}" systemctl start "$SVC_NAME" || true
@@ -1589,14 +1682,19 @@ step_set_admin_password() {
         fi
     fi
 
-    # ── 仍失败 → 重启 P4D 再试无旧密码直设 (仅当 admin 实际没有密码时有效) ──
+    # ── 仍失败 → 离线清空 admin 密码再设新密码 (需你确认) ──
     if [[ $ok -ne 1 ]]; then
-        warn "转自动重置: 停 P4D → 启动 → 无旧密码直接设新密码"
-        echo "  ${C_DIM}⚠ 重置期间客户端会断开, 下面有倒数${C_RESET}"
-        if _auto_reset_admin_pw "$pw1"; then
+        warn "没人知道 admin 当前密码 → 可以离线重置:"
+        echo "  停 P4D → 备份 db.user → 清空 admin 密码 → 启动 → 设成你刚输入的新密码"
+        echo "  ${C_DIM}期间所有客户端断开约 10-30 秒 (下面有倒数); 失败会自动还原 db.user${C_RESET}"
+        if ! require_confirm_text "继续请输入 RESET: " "RESET"; then
+            warn "已取消, admin 密码未改"
+            return 1
+        fi
+        if _auto_reset_admin_pw "$pw1" clear; then
             ok=1
         else
-            die "无法设置 admin 密码 — 需要知道当前密码 (排查: journalctl -u ${SVC_NAME} -n 30)"
+            die "离线重置失败, admin 密码未改 (排查: journalctl -u ${SVC_NAME} -n 30)"
         fi
     fi
 
