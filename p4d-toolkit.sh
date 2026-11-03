@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.4"
+readonly TOOLKIT_VERSION="1.2.5"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -1377,48 +1377,76 @@ PY
   return 0
 }
 
-# ── 无旧密码兜底: 停 P4D → 清本地 auth/passwd → 启动 → 直接设新密码 (无需旧密码) ──
+# ── 后台跑一个阻塞命令, 前台显示倒数 (超时则杀掉); 输出到 stderr, 不污染 $(...) ──
+_run_with_countdown() {
+  local secs="$1" desc="$2" pid rc=0 left
+  shift 2
+  "$@" &>/dev/null &
+  pid=$!
+  left="$secs"
+  while kill -0 "$pid" 2>/dev/null; do
+    if [[ $left -le 0 ]]; then
+      kill "$pid" 2>/dev/null || true
+      break
+    fi
+    printf '\r\033[K  ⏳ %s ... 剩余 %2d 秒' "$desc" "$left" >&2
+    sleep 1
+    left=$((left - 1))
+  done
+  wait "$pid" 2>/dev/null || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    printf '\r\033[K  ✓ %s (用时 %d 秒)\n' "$desc" "$((secs - left))" >&2
+  else
+    printf '\r\033[K  ✗ %s 失败/超时 (rc=%d)\n' "$desc" "$rc" >&2
+  fi
+  return "$rc"
+}
+
+# ── 轮询直到条件成立, 显示倒数; 成功返回 0, 超时返回 1 ──
+_wait_until_countdown() {
+  local secs="$1" desc="$2" left
+  shift 2
+  left="$secs"
+  while ! "$@" &>/dev/null; do
+    if [[ $left -le 0 ]]; then
+      printf '\r\033[K  ✗ %s 超时 (%d 秒)\n' "$desc" "$secs" >&2
+      return 1
+    fi
+    printf '\r\033[K  ⏳ %s ... 剩余 %2d 秒' "$desc" "$left" >&2
+    sleep 1
+    left=$((left - 1))
+  done
+  printf '\r\033[K  ✓ %s\n' "$desc" >&2
+  return 0
+}
+
+_p4_is_up() {
+  timeout 5 p4 -p "localhost:${P4D_PORT:-1888}" info &>/dev/null
+}
+
+# ── 无旧密码兜底: 停 P4D → 启动 → 尝试无旧密码直设 (仅当 admin 当前确实没有密码时能成功) ──
 _auto_reset_admin_pw() {
-  local new="$1" port="${P4D_PORT:-1888}" i
+  local new="$1" i
   [[ $EUID -eq 0 ]] || return 1
-  # 1) 彻底停 (systemctl + pkill 双保险)
-  systemctl stop "$SVC_NAME" 2>/dev/null || true
+  echo "  [重置 1/3] 停止 P4D 服务" >&2
+  _run_with_countdown 30 "systemctl stop ${SVC_NAME}" systemctl stop "$SVC_NAME" || true
   pkill -x p4d 2>/dev/null || true
   for i in 1 2 3 4 5; do pgrep -x p4d >/dev/null 2>&1 && pkill -9 -x p4d 2>/dev/null && sleep 1; done
-  sleep 1
-  # 2) 恢复服务 (尽力拉起; 失败不阻塞 — 离线也能设密)
-  systemctl start "$SVC_NAME" 2>/dev/null || true
-  for i in $(seq 1 10); do
-    p4 -p "localhost:${port}" info &>/dev/null && break
-    sleep 1
-  done
-  # 3a) P4D 已起来 → 在线设密 (admin passwd, 无旧密码)
-  if p4 -p "localhost:${port}" info &>/dev/null 2>&1; then
-    if _p4_admin admin "" "$new" "$new"; then
-      echo "  [重置] 在线设置完成"
-      _sync_admin_pw_to_credentials_file "$new"
-      return 0
-    fi
+
+  echo "  [重置 2/3] 启动 P4D 服务" >&2
+  _run_with_countdown 60 "systemctl start ${SVC_NAME}" systemctl start "$SVC_NAME" || true
+  if ! _wait_until_countdown 20 "等待 P4D 监听 :${P4D_PORT:-1888}" _p4_is_up; then
+    echo "  [重置] P4D 没起来, 无法设密 — 查看: journalctl -u ${SVC_NAME} -n 30" >&2
+    return 1
   fi
-  # 3b) P4D 起不来 → 离线直接改 passwd 文件 (删文件 = 清空所有密码)
-  if [[ -n "${P4ROOT:-}" && -d "${P4ROOT:-/nonexist}" ]]; then
-    local pwf="${P4ROOT}/auth/passwd"
-    rm -f "$pwf" "${pwf}.old" 2>/dev/null
-    # 再启一次 P4D
-    systemctl start "$SVC_NAME" 2>/dev/null || true
-    for i in $(seq 1 10); do
-      p4 -p "localhost:${port}" info &>/dev/null && break
-      sleep 1
-    done
-    # 若起来 → 无旧密码直设; 起不来 → 提示手动首启设密
-    if p4 -p "localhost:${port}" info &>/dev/null 2>&1 && _p4_admin admin "" "$new" "$new"; then
-      echo "  [重置] 离线清库 + 在线设密 成功"
-      _sync_admin_pw_to_credentials_file "$new"
-      return 0
-    fi
-    echo "  [重置] passwd 文件已删 — 你需先 'systemctl start p4d' 再用菜单18设密"
+
+  echo "  [重置 3/3] 尝试无旧密码直接设置新密码" >&2
+  if _p4_admin admin "" "$new" "$new" && _p4_login admin "$new"; then
+    echo "  [重置] 设置成功" >&2
+    _sync_admin_pw_to_credentials_file "$new"
     return 0
   fi
+  echo "  [重置] admin 当前已有密码, 而保存的旧密码都不对 — 无法不知道旧密码就改密" >&2
   return 1
 }
 
@@ -1438,8 +1466,16 @@ _p4_admin() {
   else
     input="$(printf '%s\n%s\n' "$new" "$new2")"
   fi
-  out="$(printf '%s\n' "$input" | timeout 15 p4 -p "localhost:${port}" -u "$user" passwd 2>&1)" || return 1
-  printf '%s' "$out" | grep -qi "Password updated" && ! printf '%s' "$out" | grep -qi "invalid\|error"
+  out="$(printf '%s\n' "$input" | timeout 15 p4 -p "localhost:${port}" -u "$user" passwd 2>&1)" || out=""
+  if printf '%s' "$out" | grep -qi "Password updated" && ! printf '%s' "$out" | grep -qi "invalid\|error"; then
+    return 0
+  fi
+  # 有旧密码但 admin 实际没设密码时, p4 只问两行新密码 → 三行喂法必失败, 改两行重试一次
+  if [[ -n "$old" ]]; then
+    _p4_admin "$user" "" "$new" "$new2"
+    return $?
+  fi
+  return 1
 }
 
 # ── 完整改密: 用旧登录 → 改密 → 用新登录验证 ──
@@ -1488,12 +1524,8 @@ step_set_admin_password() {
     done
 
     # ── 等 P4D 监听 ──
-    local _i
-    _i=0
-    while ! p4 -p "localhost:${P4D_PORT:-1888}" info &>/dev/null; do
-        _i=$((_i+1)); [[ $_i -ge 15 ]] && break; sleep 1
-    done
-    p4 -p "localhost:${P4D_PORT:-1888}" info &>/dev/null || die "P4D 监听中 (先 systemctl start ${SVC_NAME})"
+    _wait_until_countdown 15 "检查 P4D 监听 :${P4D_PORT:-1888}" _p4_is_up \
+        || die "P4D 未监听 (先 systemctl start ${SVC_NAME})"
 
     # ── 自动旧密码链: 逐个候选文件尝试, 全程零手动旧密码 ──
     local c f old ok=0
@@ -1508,22 +1540,34 @@ step_set_admin_password() {
             old="$(printf '%s' "$old" | sed 's/ *←.*//' | sed 's/[[:space:]]*$//')"
         fi
         [[ -n "$old" ]] || continue
+        echo "  ${C_DIM}尝试用 $f 里保存的旧密码 ...${C_RESET}"
         if _set_admin_pw "$old" "$pw1"; then
             echo "  ${C_DIM}旧密码自动取自: $f (无需手动输入)${C_RESET}"
             ok=1
             break
         fi
+        echo "  ${C_DIM}  → 不对, 换下一个${C_RESET}"
     done
 
-    # ── 旧密码全部失败 → 自动重置 (彻底不问你旧密码) ──
+    # ── 保存的旧密码都不对 → 让你手动输一次当前密码 (直接回车跳过) ──
     if [[ $ok -ne 1 ]]; then
-        warn "旧密码候选全部无效 → 自动重置: 停 P4D → 清除本地 auth/passwd → 启动 → 直接设新密码"
-        echo "  ${C_DIM}⚠ 重置期间客户端会短暂断开 (约 5-10 秒)${C_RESET}"
+        warn "保存的旧密码都不对"
+        old="$(_ask "输入 admin 当前密码 (不知道就直接回车跳过) " "")"
+        if [[ -n "$old" ]] && _set_admin_pw "$old" "$pw1"; then
+            ok=1
+        elif [[ -n "$old" ]]; then
+            echo "  ${C_DIM}  → 当前密码也不对${C_RESET}"
+        fi
+    fi
+
+    # ── 仍失败 → 重启 P4D 再试无旧密码直设 (仅当 admin 实际没有密码时有效) ──
+    if [[ $ok -ne 1 ]]; then
+        warn "转自动重置: 停 P4D → 启动 → 无旧密码直接设新密码"
+        echo "  ${C_DIM}⚠ 重置期间客户端会断开, 下面有倒数${C_RESET}"
         if _auto_reset_admin_pw "$pw1"; then
-            echo "  ${C_DIM}旧密码自动重置成功 (停P4D→清passwd→启→直设)${C_RESET}"
             ok=1
         else
-            die "自动重置失败 (排查: /journalctl -u ${SVC_NAME} -n 30)"
+            die "无法设置 admin 密码 — 需要知道当前密码 (排查: journalctl -u ${SVC_NAME} -n 30)"
         fi
     fi
 
