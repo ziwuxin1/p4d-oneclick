@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.9"
+readonly TOOLKIT_VERSION="1.2.10"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -1540,7 +1540,7 @@ _auto_reset_admin_pw() {
     return 0
   fi
   echo "  [重置] P4D 没接受新密码, 它的回复:" >&2
-  printf '%s\n' "${_P4_LAST_OUT:-（无输出）}" | grep -v '^Enter\|^Re-enter' | sed 's/^/      /' >&2
+  printf '%s\n' "${_P4_LAST_OUT:-（无输出）}" | grep -v '^Enter\|^Re-enter' | sed 's/^/      /' >&2 || true
   return 1
 }
 
@@ -1605,7 +1605,7 @@ _report_set_pw_rc() {
     0) echo "  ${C_DIM}旧密码来自: ${src}${C_RESET}"; return 0 ;;
     1) echo "  ${C_DIM}  → 旧密码不对${C_RESET}" ;;
     2) warn "旧密码是对的, 但 P4D 拒绝了新密码:"
-       printf '%s\n' "${_P4_LAST_OUT:-（无输出）}" | grep -v '^Enter\|^Re-enter' | sed 's/^/      /'
+       printf '%s\n' "${_P4_LAST_OUT:-（无输出）}" | grep -v '^Enter\|^Re-enter' | sed 's/^/      /' || true
        echo "  ${C_DIM}常见原因: security=2 要求 ≥8 位且含大小写混合或数字。换个新密码重新选 18${C_RESET}" ;;
     3) warn "密码已改, 但用新密码登录验证失败 — 请手动: p4 -p localhost:${P4D_PORT:-1888} -u admin login" ;;
   esac

@@ -23,7 +23,7 @@ set -o errtrace   # ERR trap 在函数内也生效,出错时能打印行号
 set -o nounset
 set -o pipefail
 
-ONECLICK_VERSION="${ONECLICK_VERSION:-1.2.2}"
+ONECLICK_VERSION="${ONECLICK_VERSION:-1.2.10}"
 readonly ONECLICK_VERSION
 
 # ============================================================
@@ -688,6 +688,48 @@ bootstrap_admin() {
     ok "security=2, dm.user.noautocreate=2, run.users.authorize=1"
 }
 
+# ── 部署收尾: 让你自己设 admin 密码 (New password / type again); 直接回车 = 保留自动生成的 ──
+#    curl | bash 时 stdin 是管道, 从 /dev/tty 读; 没有键盘 (CI/headless) 直接跳过
+choose_admin_password() {
+    can_prompt || return 0
+    step "设置 admin 密码"
+    echo "  账号: admin   (直接回车 = 保留自动生成的随机密码)"
+    echo "  规则: ≥8 位, 大写/小写/数字符号 至少两类 (P4D security=2)"
+    local pw1 pw2 cls out
+    while true; do
+        read -rsp "  New password: " pw1 < /dev/tty || pw1=""
+        echo >&2
+        if [[ -z "$pw1" ]]; then
+            info "保留自动生成的密码"
+            return 0
+        fi
+        cls=0
+        [[ "$pw1" =~ [a-z] ]] && cls=$((cls + 1))
+        [[ "$pw1" =~ [A-Z] ]] && cls=$((cls + 1))
+        [[ "$pw1" =~ [^a-zA-Z] ]] && cls=$((cls + 1))
+        if (( ${#pw1} < 8 || cls < 2 )); then
+            warn "不符合规则 (≥8 位, 大写/小写/数字符号 至少两类), 比如 Perforce2026"
+            continue
+        fi
+        read -rsp "  New password (type again): " pw2 < /dev/tty || pw2=""
+        echo >&2
+        if [[ "$pw1" != "$pw2" ]]; then
+            warn "两次不一致, 重新输入"
+            continue
+        fi
+        if out="$(printf '%s\n%s\n%s\n' "$ADMIN_PASSWORD" "$pw1" "$pw1" | p4_admin passwd 2>&1)" \
+            && [[ "$out" == *"Password updated"* ]]; then
+            break
+        fi
+        warn "P4D 没接受这个密码:"
+        printf '%s\n' "$out" | grep -v '^Enter\|^Re-enter' | sed 's/^/      /' >&2 || true
+    done
+    printf '%s' "$pw1" > "$P4D_ADMIN_PASSWD_FILE"    # 覆盖写, 保留原来的属主和 600 权限
+    ADMIN_PASSWORD="$pw1"
+    p4_admin login < "$P4D_ADMIN_PASSWD_FILE" >/dev/null || die "admin 改密后登录失败"
+    ok "admin 密码已设置: ${pw1}"
+}
+
 # ============================================================
 #  6. 首次备份(不用等到 03:00,同时验证备份链路)
 # ============================================================
@@ -984,6 +1026,7 @@ main() {
     initial_backup
     deploy_monitor
     configure_firewall
+    choose_admin_password
     write_credentials
     print_summary
 
