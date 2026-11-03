@@ -71,9 +71,21 @@ git clone https://github.com/ziwuxin1/p4d-oneclick.git && sudo bash p4d-oneclick
 
 ## 装完之后
 
+**安装完后就可以打开控制面板**（数字菜单，终端里直接按数字选）：
+
 ```bash
-sudo cat /root/p4d-oneclick-credentials.txt   # 查看 P4PORT 和各项密码
-sudo p4d-toolkit                              # 运维菜单：体检 / 救援 / 恢复 / 手动备份
+sudo p4d-toolkit                              # 控制面板：体检 / 备份 / 救援 / recovery / 改密码
+sudo cat /root/p4d-oneclick-credentials.txt   # 查看 P4PORT 和初始 admin 密码
+```
+
+菜单顶部会显示 `服务器: <IP>:1888`，直接复制到客户端登录。
+
+### 更新控制面板（本仓库发新版后）
+
+`/opt/p4d-oneclick` 是文件副本、不是 git 仓库，服务器上更新用这条（整段直接贴，30 秒完成，只刷脚本、不动 p4d / license / workshop）：
+
+```bash
+cd /tmp && sudo git clone --depth 1 https://github.com/ziwuxin1/p4d-oneclick p4d-sync && sudo cp /tmp/p4d-sync/p4d-toolkit.sh /opt/p4d-oneclick/ && sudo cp /tmp/p4d-sync/install-ubuntu.sh /opt/p4d-oneclick/ && sudo chmod +x /opt/p4d-oneclick/*.sh && rm -rf /tmp/p4d-sync && sudo p4d-toolkit
 ```
 
 面板默认只在本机监听。在你自己的电脑上开一条隧道：
