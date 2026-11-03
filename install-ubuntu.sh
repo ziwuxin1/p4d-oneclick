@@ -987,8 +987,10 @@ main() {
     write_credentials
     print_summary
 
-    # 部署完直接弹出数字菜单 (交互式终端才弹; curl|bash 管道无 tty 时自动跳过, 不卡死)
-    if [[ -t 0 ]]; then
+    # 部署完直接弹出数字菜单
+    # curl|bash 管道模式下 stdin 被管道占用, 必须显式切到 /dev/tty 才能读键盘;
+    # 无键盘的 headless 环境切不动, 自动跳过不卡死
+    if exec 0</dev/tty 2>/dev/null; then
         trap - ERR            # 解除安装期错误陷阱: 菜单内的启动/停止/体检失败不应触发安装失败处理
         echo
         main_menu
