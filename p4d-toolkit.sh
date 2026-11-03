@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.2"
+readonly TOOLKIT_VERSION="1.2.3"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
