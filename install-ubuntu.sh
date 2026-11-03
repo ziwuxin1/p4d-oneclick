@@ -351,19 +351,30 @@ generate_license_via_keygen() {
     local out="$1"
     local keygen="${KEYGEN_EXE:-}"
 
-    # 1. 找 Keygen.exe: 环境变量 → 常见路径 (可先 scp Keygen.exe root@VPS:/root/)
+    # 1. 找 Keygen: 环境变量 → 常见路径 → 自动从 GitHub 下载 (生成后自动删除)
+    local dl_keygen=""
     if [[ -z "$keygen" ]]; then
         local c
-        for c in /root/Keygen.exe "/root/p4d/Keygen.exe" "$HOME/Keygen.exe" \
-                 /usr/local/bin/Keygen.exe /opt/keygen/Keygen.exe ./Keygen.exe; do
+        for c in /root/Keygen.bin "/root/p4d/Keygen.bin" /root/Keygen.exe \
+                 "/root/p4d/Keygen.exe" "$HOME/Keygen.exe" ./Keygen.exe; do
             if [[ -f "$c" ]]; then keygen="$c"; break; fi
         done
     fi
+    # 自动下载 (公开仓库, 匿名可用) — VPS 零手动步骤
+    if [[ -z "$keygen" ]] && command -v curl >/dev/null 2>&1; then
+        local url="${KEYGEN_URL:-https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/tools/Keygen.bin}"
+        info "本地无 Keygen, 自动下载中 (约 0.8MB)..."
+        if curl -fsSL --retry 1 --max-time 120 -o /root/Keygen.bin "$url" 2>/dev/null; then
+            keygen=/root/Keygen.bin
+            dl_keygen=1
+            ok "已下载 Keygen → /root/Keygen.bin"
+        else
+            warn "Keygen 自动下载失败 (网络/仓库被拦)"
+        fi
+    fi
     if [[ -z "$keygen" ]] && can_prompt; then
         printf '\n%s[Keygen 自动生成 license]%s\n' "$C_CYAN" "$C_RESET"
-        printf '如果你有 Keygen.exe, 先放到服务器上 (如在 Windows:\n'
-        printf '   scp "D:\\...\\Keygen.exe" root@<VPS-IP>:/root/\n'
-        printf '然后输入它的完整路径; 直接回车 = 跳过, 转手动粘贴:\n'
+        printf '如果你有 Keygen.exe, 放服务器后输入完整路径; 回车 = 跳过转手动粘贴:\n'
         read -r keygen < /dev/tty || keygen=""
     fi
     if [[ -z "$keygen" || ! -f "$keygen" ]]; then
@@ -417,6 +428,10 @@ generate_license_via_keygen() {
     cp "$lic" "$out"
     install -m 600 "$lic" /root/license
     rm -rf "$work"
+    if [[ -n "$dl_keygen" && -f /root/Keygen.bin ]]; then
+        rm -f /root/Keygen.bin
+        info "已删除临时 Keygen 文件 (/root/Keygen.bin)"
+    fi
     looks_like_license "$out" || { warn "生成的文件缺 license 特征字段, 请人工检查: /root/license"; }
     return 0
 }
