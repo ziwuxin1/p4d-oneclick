@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.5"
+readonly TOOLKIT_VERSION="1.2.6"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -1364,7 +1364,7 @@ _sync_admin_pw_to_credentials_file() {
 import sys, re
 path, pw = sys.argv[1], sys.argv[2]
 t = open(path, encoding='utf-8', errors='replace').read()
-new = re.sub(r'(?m)^((?:P4 )?admin[^=]*密码=).*$', lambda m: m.group(1)+pw, t, count=1)
+new = re.sub(r'(?m)^((?:P4 )?admin 密码=).*$', lambda m: m.group(1)+pw, t, count=1)
 if new == t:
     new = t.rstrip('\n') + f'\nP4 admin 密码={pw}'
 open(path, 'w').write(new)
@@ -1458,6 +1458,8 @@ _p4_login() {
   printf '%s\n' "$pw" | timeout 15 p4 -p "localhost:${port}" -u "$user" login 2>&1 | grep -qE "logged in|login' not necessary"
 }
 
+_P4_LAST_OUT=""    # 最近一次 p4 passwd 的输出, 失败时展示给用户
+
 # ── p4 admin: 旧密码 → 新密码 (有旧密码三行, 无旧密码 p4 只问两行) ──
 _p4_admin() {
   local user="$1" old="$2" new="$3" new2="$4" port="${P4D_PORT:-1888}" out input
@@ -1471,20 +1473,49 @@ _p4_admin() {
     return 0
   fi
   # 有旧密码但 admin 实际没设密码时, p4 只问两行新密码 → 三行喂法必失败, 改两行重试一次
+  _P4_LAST_OUT="$out"
   if [[ -n "$old" ]]; then
-    _p4_admin "$user" "" "$new" "$new2"
-    return $?
+    _p4_admin "$user" "" "$new" "$new2" && return 0
+    _P4_LAST_OUT="$out"    # 报告第一次 (三行) 的错误, 更贴近真实原因
   fi
   return 1
 }
 
 # ── 完整改密: 用旧登录 → 改密 → 用新登录验证 ──
+# 返回: 0 成功 / 1 旧密码登录失败 / 2 旧密码对但 P4D 拒绝改密 (原因在 _P4_LAST_OUT) / 3 改完新密码登录不上
 _set_admin_pw() {
   local old="$1" new="$2"
+  _P4_LAST_OUT=""
   _p4_login admin "$old" || return 1
-  _p4_admin admin "$old" "$new" "$new" || return 1
-  _p4_login admin "$new" || return 1
+  _p4_admin admin "$old" "$new" "$new" || return 2
+  _p4_login admin "$new" || return 3
   return 0
+}
+
+# ── 从凭据文件取 admin 密码: .txt 取 "P4 admin 密码=" 那一行, 其它文件取整个内容 ──
+_read_saved_admin_pw() {
+  local f="$1" line
+  if [[ "$f" == *.txt ]]; then
+    line="$(grep -m1 -E '^(P4 )?admin 密码=|^P4PASSWD=' "$f" 2>/dev/null)" || return 0
+    line="${line#*=}"
+    printf '%s' "$line" | sed 's/ *←.*//; s/[[:space:]]*$//'
+  else
+    tr -d ' \t\r\n' < "$f" 2>/dev/null || true
+  fi
+}
+
+# ── 把 _set_admin_pw 的返回码翻成人话; 成功返回 0 ──
+_report_set_pw_rc() {
+  local rc="$1" src="$2"
+  case "$rc" in
+    0) echo "  ${C_DIM}旧密码来自: ${src}${C_RESET}"; return 0 ;;
+    1) echo "  ${C_DIM}  → 旧密码不对${C_RESET}" ;;
+    2) warn "旧密码是对的, 但 P4D 拒绝了新密码:"
+       printf '%s\n' "${_P4_LAST_OUT:-（无输出）}" | grep -v '^Enter\|^Re-enter' | sed 's/^/      /'
+       echo "  ${C_DIM}常见原因: security=2 要求 ≥8 位且含大小写混合或数字。换个新密码重新选 18${C_RESET}" ;;
+    3) warn "密码已改, 但用新密码登录验证失败 — 请手动: p4 -p localhost:${P4D_PORT:-1888} -u admin login" ;;
+  esac
+  return 1
 }
 
 step_set_admin_password() {
@@ -1512,15 +1543,19 @@ step_set_admin_password() {
     fi
 
     # ── 交互: 只问你新密码 (输两次) ──
-    local pw1=""
-    while [[ ${#pw1} -lt 6 ]]; do
-        pw1="$(_ask "输入 admin 新密码 (≥6位, 大小写+数字+符号) " "")"
-        [[ ${#pw1} -ge 6 ]] || echo "  ⚠ 至少 6 位"
-    done
-    local pw2=""
-    while [[ "$pw2" != "$pw1" ]]; do
+    # security=2 的强密码规则: ≥8 位, 且含大小写混合或数字/符号
+    local pw1="" pw2=""
+    while true; do
+        pw1="$(_ask "输入 admin 新密码 (≥8位, 含大小写或数字) " "")"
+        if [[ ${#pw1} -lt 8 ]]; then
+            echo "  ⚠ 至少 8 位 (P4D security=2 要求)"; continue
+        fi
+        if [[ "$pw1" =~ ^[a-z]+$ || "$pw1" =~ ^[A-Z]+$ ]]; then
+            echo "  ⚠ 不能全是同一种大小写字母, 加点数字或换大小写"; continue
+        fi
         pw2="$(_ask "再输入一次确认 (不回显) " "")"
-        [[ "$pw2" == "$pw1" ]] || { echo "  ⚠ 两次不一致, 重头来"; pw1=""; pw2=""; }
+        [[ "$pw2" == "$pw1" ]] && break
+        echo "  ⚠ 两次不一致, 重头来"
     done
 
     # ── 等 P4D 监听 ──
@@ -1528,35 +1563,29 @@ step_set_admin_password() {
         || die "P4D 未监听 (先 systemctl start ${SVC_NAME})"
 
     # ── 自动旧密码链: 逐个候选文件尝试, 全程零手动旧密码 ──
-    local c f old ok=0
-    for c in "${P4D_ADMIN_PASSWD_FILE}" /root/p4d-oneclick-credentials.txt /root/perforce-credentials.txt; do
+    local c f old ok=0 rc
+    # 也试安装时留下的 .bak: 旧版菜单 18 曾在重置失败时谎报成功, 把未生效的新密码写进了上面两个文件
+    for c in "${P4D_ADMIN_PASSWD_FILE}" /root/p4d-oneclick-credentials.txt /root/perforce-credentials.txt \
+             /root/p4d-oneclick-credentials.txt.*.bak; do
         [[ -n "$c" && -s "$c" ]] || continue
         f="$(readlink -f "$c" 2>/dev/null)" || f="$c"
         [[ -s "$f" ]] || continue
-        old="$(tr -d ' \t\r\n' < "$f" 2>/dev/null)" || old=""
-        if [[ -z "$old" && "$f" == *.txt ]]; then
-            old="$(grep -m1 -E "admin.*密码=|PASSWD=" "$f" 2>/dev/null | head -n1)"
-            old="${old##*=}"
-            old="$(printf '%s' "$old" | sed 's/ *←.*//' | sed 's/[[:space:]]*$//')"
-        fi
+        old="$(_read_saved_admin_pw "$f")"
         [[ -n "$old" ]] || continue
         echo "  ${C_DIM}尝试用 $f 里保存的旧密码 ...${C_RESET}"
-        if _set_admin_pw "$old" "$pw1"; then
-            echo "  ${C_DIM}旧密码自动取自: $f (无需手动输入)${C_RESET}"
-            ok=1
-            break
-        fi
-        echo "  ${C_DIM}  → 不对, 换下一个${C_RESET}"
+        rc=0; _set_admin_pw "$old" "$pw1" || rc=$?
+        _report_set_pw_rc "$rc" "$f" && { ok=1; break; }
+        [[ $rc -eq 2 ]] && return 1    # 旧密码是对的, 是新密码被拒 — 再试别的旧密码没意义
     done
 
     # ── 保存的旧密码都不对 → 让你手动输一次当前密码 (直接回车跳过) ──
     if [[ $ok -ne 1 ]]; then
         warn "保存的旧密码都不对"
         old="$(_ask "输入 admin 当前密码 (不知道就直接回车跳过) " "")"
-        if [[ -n "$old" ]] && _set_admin_pw "$old" "$pw1"; then
-            ok=1
-        elif [[ -n "$old" ]]; then
-            echo "  ${C_DIM}  → 当前密码也不对${C_RESET}"
+        if [[ -n "$old" ]]; then
+            rc=0; _set_admin_pw "$old" "$pw1" || rc=$?
+            _report_set_pw_rc "$rc" "手动输入" && ok=1
+            [[ $rc -eq 2 ]] && return 1
         fi
     fi
 
