@@ -1425,13 +1425,19 @@ _auto_reset_admin_pw() {
 _p4_login() {
   local user="$1" pw="$2" port="${P4D_PORT:-1888}"
   [[ -n "$pw" ]] || pw=""
-  printf '%s\n' "$pw" | p4 -p "localhost:${port}" -u "$user" login 2>&1 | grep -q "logged in"
+  # timeout: p4 偶尔会去读 /dev/tty 等输入, 不加超时会无声卡死
+  printf '%s\n' "$pw" | timeout 15 p4 -p "localhost:${port}" -u "$user" login 2>&1 | grep -qE "logged in|login' not necessary"
 }
 
-# ── p4 admin: 旧密码 → 新密码 (三行管道) ──
+# ── p4 admin: 旧密码 → 新密码 (有旧密码三行, 无旧密码 p4 只问两行) ──
 _p4_admin() {
-  local user="$1" old="$2" new="$3" new2="$4" port="${P4D_PORT:-1888}" out
-  out="$(printf '%s\n%s\n%s\n' "$old" "$new" "$new2" | p4 -p "localhost:${port}" -u "$user" passwd 2>&1)" || return 1
+  local user="$1" old="$2" new="$3" new2="$4" port="${P4D_PORT:-1888}" out input
+  if [[ -n "$old" ]]; then
+    input="$(printf '%s\n%s\n%s\n' "$old" "$new" "$new2")"
+  else
+    input="$(printf '%s\n%s\n' "$new" "$new2")"
+  fi
+  out="$(printf '%s\n' "$input" | timeout 15 p4 -p "localhost:${port}" -u "$user" passwd 2>&1)" || return 1
   printf '%s' "$out" | grep -qi "Password updated" && ! printf '%s' "$out" | grep -qi "invalid\|error"
 }
 
@@ -1453,9 +1459,11 @@ step_set_admin_password() {
     echo "  其他同事也要用 P4D? 完成后可用 admin 建独立超级用户账号发放"
     echo
 
-    # ── 自动模式 A: 部署中/无 TTY 且密码已由调用方给定 → 静默直接设 ──
-    if [[ -n "${P4D_ASSUME_YES:-0}" && -s "${P4D_ADMIN_PASSWD_FILE:-}" ]]; then
+    # ── 自动模式 A: 部署中(P4D_ASSUME_YES=1)/无 TTY 且密码已由调用方给定 → 静默直接设 ──
+    # 注意: 不能用 -n "${P4D_ASSUME_YES:-0}" — "0" 也非空, 会让菜单 18 永远走自动分支、不问密码
+    if [[ ( "${P4D_ASSUME_YES:-0}" == "1" || ! -t 0 ) && -s "${P4D_ADMIN_PASSWD_FILE:-}" ]]; then
         local _n
+        echo "  ${C_DIM}[自动] 使用 ${P4D_ADMIN_PASSWD_FILE} 中的密码设置 admin ...${C_RESET}"
         _n="$(tr -d ' \t\r\n' < "$P4D_ADMIN_PASSWD_FILE" 2>/dev/null)" || _n=""
         if [[ ${#_n} -ge 6 ]] && { _set_admin_pw "$_n" "$_n" 2>/dev/null || _set_admin_pw "" "$_n" 2>/dev/null || _auto_reset_admin_pw "$_n"; }; then
             printf '%s' "$_n" > "$P4D_ADMIN_PASSWD_FILE"; chmod 600 "$P4D_ADMIN_PASSWD_FILE" 2>/dev/null
