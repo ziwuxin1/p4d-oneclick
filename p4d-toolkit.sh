@@ -1468,6 +1468,12 @@ main_menu() {
         # 每次菜单刷新都跑一次健康体检 — 状态实时显示
         # (原来只在首次跑,用户反馈"看不到状态变化",改成每次都跑)
         step_health_check
+        # 显示当前服务器 IP (外网 IP:端口, 方便复制登录)
+        local sip
+        sip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | grep -v '^127\.' | head -1 || true)"
+        if [[ -n "$sip" ]]; then
+            echo "${C_DIM}  服务器: ${C_BOLD}${C_GREEN}${sip}:${P4PORT}${C_RESET}${C_DIM}   本机: ${C_GRAY}127.0.0.1:${P4PORT}  (P4USER=admin)${C_RESET}"
+        fi
         echo
         cat <<MENU
 
