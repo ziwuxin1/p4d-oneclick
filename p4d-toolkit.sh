@@ -1357,27 +1357,45 @@ PY
 _auto_reset_admin_pw() {
   local new="$1" port="${P4D_PORT:-1888}" i
   [[ $EUID -eq 0 ]] || return 1
-  # 1) 停
-  if systemctl is-active -q "$SVC_NAME" 2>/dev/null; then
-    systemctl stop "$SVC_NAME" 2>/dev/null || pkill -x p4d 2>/dev/null
-  else
-    pkill -x p4d 2>/dev/null
-  fi
-  sleep 2
-  # 2) 清本地密码
-  local pwf="${P4ROOT}/auth/passwd"
-  [[ -e "$pwf" ]] && rm -f "$pwf" "${pwf}.old" 2>/dev/null
-  # 3) 启动
-  systemctl start "$SVC_NAME" 2>/dev/null || pkill -USR1 -x p4d 2>/dev/null || true
-  for i in $(seq 1 20); do
+  # 1) 彻底停 (systemctl + pkill 双保险)
+  systemctl stop "$SVC_NAME" 2>/dev/null || true
+  pkill -x p4d 2>/dev/null || true
+  for i in 1 2 3 4 5; do pgrep -x p4d >/dev/null 2>&1 && pkill -9 -x p4d 2>/dev/null && sleep 1; done
+  sleep 1
+  # 2) 恢复服务 (尽力拉起; 失败不阻塞 — 离线也能设密)
+  systemctl start "$SVC_NAME" 2>/dev/null || true
+  for i in $(seq 1 10); do
     p4 -p "localhost:${port}" info &>/dev/null && break
     sleep 1
   done
-  p4 -p "localhost:${port}" info &>/dev/null || return 1
-  # 4) 无密码直接设
-  _p4_login admin "" || return 1
-  _p4_admin admin "" "$new" "$new" || return 1
-  return 0
+  # 3a) P4D 已起来 → 在线设密 (admin passwd, 无旧密码)
+  if p4 -p "localhost:${port}" info &>/dev/null 2>&1; then
+    if _p4_admin admin "" "$new" "$new"; then
+      echo "  [重置] 在线设置完成"
+      _sync_admin_pw_to_credentials_file "$new"
+      return 0
+    fi
+  fi
+  # 3b) P4D 起不来 → 离线直接改 passwd 文件 (删文件 = 清空所有密码)
+  if [[ -n "${P4ROOT:-}" && -d "${P4ROOT:-/nonexist}" ]]; then
+    local pwf="${P4ROOT}/auth/passwd"
+    rm -f "$pwf" "${pwf}.old" 2>/dev/null
+    # 再启一次 P4D
+    systemctl start "$SVC_NAME" 2>/dev/null || true
+    for i in $(seq 1 10); do
+      p4 -p "localhost:${port}" info &>/dev/null && break
+      sleep 1
+    done
+    # 若起来 → 无旧密码直设; 起不来 → 提示手动首启设密
+    if p4 -p "localhost:${port}" info &>/dev/null 2>&1 && _p4_admin admin "" "$new" "$new"; then
+      echo "  [重置] 离线清库 + 在线设密 成功"
+      _sync_admin_pw_to_credentials_file "$new"
+      return 0
+    fi
+    echo "  [重置] passwd 文件已删 — 你需先 'systemctl start p4d' 再用菜单18设密"
+    return 0
+  fi
+  return 1
 }
 
 # ── p4 客户端: 用密码登录 (管道喂密, 成功返回0) ──
