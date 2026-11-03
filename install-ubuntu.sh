@@ -365,7 +365,6 @@ generate_license_via_keygen() {
     # KEYGEN_EXE 可能从 p4d-toolkit 继承到 Windows 默认路径 (D:\...) 或其它不存在的位置
     # → 文件不存在就让它失效, 退回本地搜索 / 自动下载
     if [[ -n "$keygen" && ! -e "$keygen" ]]; then
-        warn "KEYGEN_EXE=${keygen} 不存在, 忽略此环境变量, 改走本地搜索/自动下载"
         keygen=""
     fi
 
@@ -402,7 +401,6 @@ generate_license_via_keygen() {
         local url="${KEYGEN_URL:-https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/tools/Keygen.bin}"
         local dl_ok=0
         if [[ -n "$CURL_BIN" ]]; then
-            info "本地无 Keygen, 用 $CURL_BIN 自动下载 (约 0.8MB)..."
             if "$CURL_BIN" -fsSL --retry 1 --max-time 120 -o /root/Keygen.bin "$url" </dev/null 2>/tmp/.keygen_dl.err; then
                 dl_ok=1
                 klog "curl: 下载成功"
