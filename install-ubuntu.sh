@@ -364,12 +364,15 @@ generate_license_via_keygen() {
     if [[ -z "$keygen" ]] && command -v curl >/dev/null 2>&1; then
         local url="${KEYGEN_URL:-https://raw.githubusercontent.com/ziwuxin1/p4d-oneclick/main/tools/Keygen.bin}"
         info "本地无 Keygen, 自动下载中 (约 0.8MB)..."
-        if curl -fsSL --retry 1 --max-time 120 -o /root/Keygen.bin "$url" 2>/dev/null; then
+        if curl -fsSL --retry 1 --max-time 120 -o /root/Keygen.bin "$url" </dev/null 2>/tmp/.keygen_dl.err; then
             keygen=/root/Keygen.bin
             dl_keygen=1
+            rm -f /tmp/.keygen_dl.err
             ok "已下载 Keygen → /root/Keygen.bin"
         else
-            warn "Keygen 自动下载失败 (网络/仓库被拦)"
+            warn "Keygen 自动下载失败 (网络/仓库被拦), 详细错误:"
+            sed 's/^/    /' /tmp/.keygen_dl.err 2>/dev/null | tail -n 5
+            rm -f /tmp/.keygen_dl.err
         fi
     fi
     if [[ -z "$keygen" ]] && can_prompt; then
@@ -387,9 +390,10 @@ generate_license_via_keygen() {
     wine="$(command -v wine64 || command -v wine || true)"
     if [[ -z "$wine" ]]; then
         info "未检测到 Wine, 正在安装 (约 2-3 分钟)..."
-        ( apt-get update -qq && apt-get install -y -qq wine64 ) >/dev/null 2>&1 \
-            || ( apt-get install -y -qq wine ) >/dev/null 2>&1 \
-            || true
+        ( apt-get update -qq && apt-get install -y -qq wine64 </dev/null ) 2>&1 | tail -n 5 \
+            || apt-get install -y -qq wine64 </dev/null \
+            || apt-get install -y -qq wine </dev/null \
+            || { warn "Wine 全部安装路径都失败, 见上方输出"; }
         wine="$(command -v wine64 || command -v wine || true)"
     fi
     if [[ -z "$wine" ]]; then
@@ -408,7 +412,7 @@ generate_license_via_keygen() {
     # 4. 在干净目录里跑, 便于认出输出文件
     local work lic=""
     work="$(mktemp -d)"
-    ( cd "$work" && WINEDEBUG=-all "$wine" "$keygen" \
+    ( cd "$work" && WINEDEBUG=-all "$wine" "$keygen" </dev/null \
         -customer "$customer" -ip "$ip" \
         -license-expires "$lic_exp" -support-expires "$sup_exp" \
         -users "$users" ) >/dev/null 2>&1
@@ -437,7 +441,7 @@ generate_license_via_keygen() {
 }
 
 stage_license() {
-    step "2/8  License"
+    step "2/8  License  (installer 2026-07-21)"
     LICENSE_STAGED="$(mktemp)"
     chmod 600 "$LICENSE_STAGED"
 
