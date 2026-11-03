@@ -23,7 +23,8 @@ set -o errtrace   # ERR trap 在函数内也生效,出错时能打印行号
 set -o nounset
 set -o pipefail
 
-readonly ONECLICK_VERSION="1.0.0"
+ONECLICK_VERSION="${ONECLICK_VERSION:-1.2.2}"
+readonly ONECLICK_VERSION
 
 # ============================================================
 #  配置(环境变量可覆盖,命令行参数优先级最高)
