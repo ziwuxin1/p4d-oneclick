@@ -27,7 +27,7 @@ set -o pipefail
 #  Toolkit 版本(每次 commit 自动 +1,见 .githooks/pre-commit)
 # ============================================================
 
-readonly TOOLKIT_VERSION="1.2.3"
+readonly TOOLKIT_VERSION="1.2.4"
 
 # ============================================================
 #  配置(可通过环境变量 / 配置文件覆盖)
@@ -151,7 +151,8 @@ _ask() {
     else
         read -rsp "$(printf "${C_YELLOW:-}?${C_RESET:-}  %s " "$prompt")" ans || ans=""
     fi
-    printf '\n'
+    # 换行必须走 stderr: stdout 会被调用方的 $(...) 吞掉, 导致下一个提示接在同一行
+    printf '\n' >&2
     [[ -n "$ans" ]] || ans="$default"
     printf '%s' "$ans"
     return 0
@@ -1482,7 +1483,7 @@ step_set_admin_password() {
     done
     local pw2=""
     while [[ "$pw2" != "$pw1" ]]; do
-        pw2="$(_ask "再输入一次确认 (不回显) " "$pw1")"
+        pw2="$(_ask "再输入一次确认 (不回显) " "")"
         [[ "$pw2" == "$pw1" ]] || { echo "  ⚠ 两次不一致, 重头来"; pw1=""; pw2=""; }
     done
 
