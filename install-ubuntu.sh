@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # P4D One-Click — Ubuntu 全自动部署 Perforce P4D + 自愈 + 备份 + 监控面板
-# Target: 全新 Ubuntu 22.04 / 24.04 (x86_64) VPS
+# Target: 全新 Ubuntu 22.04 / 24.04 / 26.04 (x86_64) VPS
 #
 # 用法:
 #   # license 已经传到服务器上
@@ -45,7 +45,7 @@ readonly MONITOR_SERVICE="p4d-monitor"
 readonly MONITOR_CONFIG="${MONITOR_DIR}/config/config.yaml"
 readonly MONITOR_SSH_KEY="/etc/p4d-monitor/ssh_key"
 
-readonly SUPPORTED_UBUNTU="22.04 24.04"
+readonly SUPPORTED_UBUNTU="22.04 24.04 26.04"
 readonly MIN_RAM_MB="${MIN_RAM_MB:-900}"          # 1GB VPS 的 MemTotal 约 960MB
 readonly RECOMMENDED_RAM_MB=1800                   # 低于这个且没有 swap → 自动建 swap
 readonly SWAP_FILE="/swapfile"
